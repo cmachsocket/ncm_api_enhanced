@@ -57,7 +57,59 @@ bare-module loader 看不到它的 imports map。
 - **bindings**（node 原生模块加载）— `safe-decode-uri-component` 通过它加载 native addons
   → bare 没有 native addon 入口 → 这个包要换
 
-## 部署形态的现实约束
+### 真正试过的两条路径
+
+#### 路径 1：`require('bare-node-runtime/global')`（globals 注入）
+
+```js
+require('bare-node-runtime/global')
+console.log(typeof process, typeof Buffer, typeof __dirname)
+// → 'object' 'function' 'string' ✓
+```
+
+✅ **globals 注入成功**。进程/Buffer/global/timers/structuredClone 全有。
+
+❌ **不解决 builtin module**：`require('fs')` 仍报 `MODULE_NOT_FOUND`。
+globals ≠ builtin modules。bare 没有内置 fs/path/... 表。
+
+#### 路径 2：`bare-node-runtime/imports.json` 作为 import map 数据
+
+```js
+// in caller/package.json:
+{
+  "imports": {
+    "fs": "bare-fs",
+    "path": "bare-path",
+    "events": "bare-events",
+    ...
+  }
+}
+```
+
+**bare 行为（实测）**：
+- caller 自己 `require('fs')` → 走 caller 的 imports map → ✓
+- caller `require('xml2js')` → 加载成功
+- xml2js 内部 `require('events')` → ❌ **失败**
+
+**原因**：bare-module 看的是 `require` 所在文件的直接 caller 的 package.json（=xml2js 自己的），**不上溯**到我们 caller 的 imports map。这是 bare-module 的标准行为，**不**像 Node 某些场景会沿 require chain 累积 imports。
+
+所以 `bare-node-runtime` 的真正用法：**每个依赖 Node builtin 的 npm 包自己装 bare-node-fs/bare-events/...**，或者**包自己的 package.json 写 imports map**。
+
+**`bare-node-runtime/imports.json` 是给"知道自己在 bare 下跑"的包用的 import map 数据资源**，不是自动生效的魔药。
+
+### bundle.js 的根本约束
+
+bundle.js 是 esbuild 单文件 IIFE 输出（不是 bare package）。`require('fs')` 在 bundle 内部 —— caller chain 顶端是 bundle.js 自己 — 它**没有 package.json**，bare-module 找不到 imports map。
+
+**两条出路**：
+
+1. **bundle 拆包**：bundle.js → `bundle/index.js` + `bundle/package.json`（imports）
+   + `bundle/node_modules/`（bare-* 依赖）。破坏单文件 deploy。
+
+2. **bundle.js 顶部 inline shim**：bundle.js IIFE 最前面加一段 require 替换代码，
+   拦截 builtin name 重定向到 bare-*。脆弱（依赖 bare 内部 API），但保留单文件。
+
+**两条都做完工作量都差不多**。**推荐 (1)** —— 干净、可维护。
 
 **桌面端 (Linux/macOS/Windows)**：当前 spawn 系统 `node` 进程跑 `dist/bundle.js`。
 换 bare 不增加价值（bare 桌面端没有 node 跑得更好），且 bare 不是 npm-installed 系统包，
@@ -109,6 +161,18 @@ embedded runtime 路径。
 - 分支：`bear`（已推 origin）
 - 内容：`/tmp/bear-poc/` 下的 PoC 脚本和结论（本目录 doc）
 - **没动项目代码**
+
+## 重新验证后修正
+
+之前的 PoC 第一轮失败（所有 require 失败）的原因是测试入口没装齐 bare-* deps；
+第二轮加了 caller 的 imports map 后：
+
+- ✅ caller 直接 require fs/path/events 走 imports map 替换 bare-* OK
+- ✅ 同包里的纯 JS 包（crypto-js）可加载
+- ❌ nested require（xml2js 内部 require 'events'）**不走** caller 的 imports map
+  → 这是 bare-module 的设计：只查 direct caller 的 package.json
+- 🔄 `bare-node-runtime` 的真实用法是给每个包自己写 imports map，不是 wrapper
+- 📝 bundle.js 单文件没有 package.json → 必须包化为 bare package（拆 bundle）
 
 ## 下一步建议
 
