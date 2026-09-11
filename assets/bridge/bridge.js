@@ -65,6 +65,28 @@ function replySuccess(id, result) {
 }
 
 function replyError(id, err) {
+  // Upstream fns sometimes Promise.reject({status, body, cookie}) instead of
+  // an Error. JSON-stringify the value into `message` so Dart (which only
+  // reads `message`/`stack` per the NDJSON protocol) sees something useful
+  // instead of the useless "[object Object]".
+  if (err && typeof err === 'object' && !(err instanceof Error)) {
+    let msg
+    try {
+      msg = JSON.stringify(err)
+    } catch {
+      msg = String(err)
+    }
+    send({
+      id,
+      ok: false,
+      error: {
+        message: msg,
+        stack: undefined,
+      },
+    })
+    return
+  }
+
   const error =
     err instanceof Error
       ? err

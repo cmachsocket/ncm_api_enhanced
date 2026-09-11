@@ -260239,6 +260239,23 @@ function replySuccess(id, result2) {
   });
 }
 function replyError(id, err) {
+  if (err && typeof err === "object" && !(err instanceof Error)) {
+    let msg;
+    try {
+      msg = JSON.stringify(err);
+    } catch {
+      msg = String(err);
+    }
+    send({
+      id,
+      ok: false,
+      error: {
+        message: msg,
+        stack: void 0
+      }
+    });
+    return;
+  }
   const error = err instanceof Error ? err : new Error(String(err));
   send({
     id,
