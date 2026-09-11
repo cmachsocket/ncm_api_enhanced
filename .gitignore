@@ -13,7 +13,7 @@ packages/ncm_api_enhanced/android/src/main/jniLibs/*/libnode.so
 .packages
 .pub-cache/
 .pub/
-.idea/
+/.idea/
 *.iml
 
 # OS junk

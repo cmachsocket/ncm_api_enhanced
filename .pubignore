@@ -16,6 +16,6 @@ android/src/main/jniLibs/*/libnode.so
 # and `flutter pub get`. They're recreated as needed.
 /build/
 .dart_tool/
-.idea/
+/.idea/
 *.iml
 .DS_Store

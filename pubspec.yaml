@@ -34,22 +34,6 @@ dev_dependencies:
   asset_fill: 
 
 flutter:
-  plugin:
-    platforms:
-      # libnode.so is downloaded by hook/build.dart; the JNI wrapper
-      # (`libncm_node_bridge.so`) is built from android/src/main/cpp
-      # via externalNativeBuild in android/build.gradle.
-      android:
-        package: com.example.ncm_api_enhanced
-        pluginClass: NcmNodeBridge
-      # NodeMobile.xcframework is added to the Xcode project by the
-      # human (or by tool/patch_ios_pbxproj.rb); the wrapper classes
-      # live under ios/Classes/.
-      ios:
-        pluginClass: NcmNodeBridge
-      # Desktop (Linux/macOS/Windows) is pure Dart — it spawns the
-      # system `node` binary via Process. No plugin registration
-      # needed; NcmBridgeFactory picks DesktopNcmBridge automatically.
   assets:
     - assets/bridge/
     - assets/bridge/node_modules/
@@ -858,4 +842,19 @@ flutter:
     - assets/bridge/node_modules/yargs-parser/
     - assets/bridge/node_modules/yargs-parser/build/
     - assets/bridge/node_modules/yargs-parser/build/lib/
-    
+  plugin:
+    platforms:
+      # libnode.so is downloaded by hook/build.dart; the JNI wrapper
+      # (`libncm_node_bridge.so`) is built from android/src/main/cpp
+      # via externalNativeBuild in android/build.gradle.
+      android:
+        package: com.example.ncm_api_enhanced
+        pluginClass: NcmNodeBridge
+      # NodeMobile.xcframework is added to the Xcode project by the
+      # human (or by tool/patch_ios_pbxproj.rb); the wrapper classes
+      # live under ios/Classes/.
+      ios:
+        pluginClass: NcmNodeBridge
+      # Desktop (Linux/macOS/Windows) is pure Dart — it spawns the
+      # system `node` binary via Process. No plugin registration
+      # needed; NcmBridgeFactory picks DesktopNcmBridge automatically.
