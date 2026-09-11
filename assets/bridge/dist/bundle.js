@@ -201990,6 +201990,96 @@ var require_register_checktoken_v3 = __commonJS({
   }
 });
 
+// node_modules/@neteasecloudmusicapienhanced/api/module/register_xeapikey.js
+var require_register_xeapikey = __commonJS({
+  "node_modules/@neteasecloudmusicapienhanced/api/module/register_xeapikey.js"(exports2, module2) {
+    var { default: axios } = require_axios();
+    var encrypt = require_crypto();
+    var { APP_CONF } = require_config();
+    var generateNonce = () => {
+      let nonce = "";
+      for (let i = 0; i < 16; i++) {
+        nonce += Math.floor(Math.random() * 10).toString();
+      }
+      return nonce;
+    };
+    module2.exports = async (query, request) => {
+      const nonce = generateNonce();
+      const timestamp = String(Date.now());
+      const deviceId = query.deviceId || global.deviceId || "";
+      const currentKeyVersion = query.currentKeyVersion || "";
+      const data = {
+        appVersion: "9.5.61",
+        currentKeyVersion,
+        deviceId,
+        nonce,
+        os: "android",
+        requestType: "active",
+        signature: encrypt.xeapiSign(timestamp, nonce),
+        t1: "",
+        t2: "",
+        timestamp,
+        uid: ""
+      };
+      const res = await axios({
+        method: "POST",
+        url: APP_CONF.apiDomain + "/api/gorilla/anti/crawler/security/key/get",
+        headers: {
+          "User-Agent": "NeteaseMusic/9.5.61.260802021928(9005061);Dalvik/2.1.0 (Linux; U; Android 12; HBN-AL00 Build/cd737a2.0)",
+          Cookie: deviceId ? `deviceId=${encodeURIComponent(deviceId)}` : ""
+        },
+        data: new URLSearchParams(data).toString(),
+        proxy: false
+      });
+      if (!res.data || res.data.code !== 200 || !res.data.data || !res.data.data.encryptedData) {
+        throw new Error("xeapi public key request failed");
+      }
+      if (!res.data.data.signature || encrypt.xeapiSign(res.data.data.timestamp, nonce) !== res.data.data.signature) {
+        throw new Error("xeapi public key response signature mismatch");
+      }
+      const publicKey = encrypt.xeapiDecryptPublicKey(res.data.data.encryptedData);
+      if (!publicKey.sk) {
+        throw new Error("xeapi public key response missing sk");
+      }
+      return {
+        status: 200,
+        body: {
+          ...publicKey,
+          deviceId
+        },
+        cookie: []
+      };
+    };
+  }
+});
+
+// node_modules/@neteasecloudmusicapienhanced/api/util/xeapiKey.js
+var require_xeapiKey = __commonJS({
+  "node_modules/@neteasecloudmusicapienhanced/api/util/xeapiKey.js"(exports2, module2) {
+    var registerXeapiKey = require_register_xeapikey();
+    var getXeapiPublicKey = async (currentPublicKey = {}, deviceId = "") => {
+      const result2 = await registerXeapiKey(
+        {
+          deviceId,
+          currentKeyVersion: currentPublicKey.version || ""
+        },
+        null
+      );
+      const publicKey = result2.body;
+      if (!publicKey.sk && currentPublicKey.sk) {
+        publicKey.sk = currentPublicKey.sk;
+      }
+      if (!publicKey.sk) {
+        throw new Error("xeapi public key response missing sk");
+      }
+      return publicKey;
+    };
+    module2.exports = {
+      getXeapiPublicKey
+    };
+  }
+});
+
 // node_modules/@neteasecloudmusicapienhanced/api/util/request.js
 var require_request = __commonJS({
   "node_modules/@neteasecloudmusicapienhanced/api/util/request.js"(exports2, module2) {
@@ -202018,10 +202108,14 @@ var require_request = __commonJS({
     var {
       getToken: antiCheatTokenV3
     } = require_register_checktoken_v3();
-    var anonymous_token = fs.readFileSync(
-      path.resolve(tmpPath, "./anonymous_token"),
-      "utf-8"
-    );
+    var anonymous_token = "";
+    try {
+      anonymous_token = fs.readFileSync(
+        path.resolve(tmpPath, "./anonymous_token"),
+        "utf-8"
+      );
+    } catch (_) {
+    }
     var xeapiPublicKeyPath = path.resolve(tmpPath, "./xeapi_public_key");
     var xeapi_public_key = null;
     var loadXeapiPublicKey = () => {
@@ -202147,6 +202241,20 @@ var require_request = __commonJS({
     };
     var createRequest = async (uri, data, options) => {
       let token = "";
+      const __ncmEnsureXeapi = async () => {
+        if (xeapi_public_key) return;
+        const { getXeapiPublicKey } = require_xeapiKey();
+        const deviceId = global.deviceId || require_util().generateDeviceId();
+        const next = await getXeapiPublicKey(
+          xeapi_public_key || {},
+          deviceId
+        );
+        xeapi_public_key = next;
+        global.deviceId = deviceId;
+      };
+      if (!xeapi_public_key) {
+        await __ncmEnsureXeapi();
+      }
       switch (options.checkToken) {
         case "v2":
           token = await antiCheatTokenV2();
@@ -240503,69 +240611,6 @@ var require_related_allvideo = __commonJS({
         data,
         createOption(query, "weapi")
       );
-    };
-  }
-});
-
-// node_modules/@neteasecloudmusicapienhanced/api/module/register_xeapikey.js
-var require_register_xeapikey = __commonJS({
-  "node_modules/@neteasecloudmusicapienhanced/api/module/register_xeapikey.js"(exports2, module2) {
-    var { default: axios } = require_axios();
-    var encrypt = require_crypto();
-    var { APP_CONF } = require_config();
-    var generateNonce = () => {
-      let nonce = "";
-      for (let i = 0; i < 16; i++) {
-        nonce += Math.floor(Math.random() * 10).toString();
-      }
-      return nonce;
-    };
-    module2.exports = async (query, request) => {
-      const nonce = generateNonce();
-      const timestamp = String(Date.now());
-      const deviceId = query.deviceId || global.deviceId || "";
-      const currentKeyVersion = query.currentKeyVersion || "";
-      const data = {
-        appVersion: "9.5.61",
-        currentKeyVersion,
-        deviceId,
-        nonce,
-        os: "android",
-        requestType: "active",
-        signature: encrypt.xeapiSign(timestamp, nonce),
-        t1: "",
-        t2: "",
-        timestamp,
-        uid: ""
-      };
-      const res = await axios({
-        method: "POST",
-        url: APP_CONF.apiDomain + "/api/gorilla/anti/crawler/security/key/get",
-        headers: {
-          "User-Agent": "NeteaseMusic/9.5.61.260802021928(9005061);Dalvik/2.1.0 (Linux; U; Android 12; HBN-AL00 Build/cd737a2.0)",
-          Cookie: deviceId ? `deviceId=${encodeURIComponent(deviceId)}` : ""
-        },
-        data: new URLSearchParams(data).toString(),
-        proxy: false
-      });
-      if (!res.data || res.data.code !== 200 || !res.data.data || !res.data.data.encryptedData) {
-        throw new Error("xeapi public key request failed");
-      }
-      if (!res.data.data.signature || encrypt.xeapiSign(res.data.data.timestamp, nonce) !== res.data.data.signature) {
-        throw new Error("xeapi public key response signature mismatch");
-      }
-      const publicKey = encrypt.xeapiDecryptPublicKey(res.data.data.encryptedData);
-      if (!publicKey.sk) {
-        throw new Error("xeapi public key response missing sk");
-      }
-      return {
-        status: 200,
-        body: {
-          ...publicKey,
-          deviceId
-        },
-        cookie: []
-      };
     };
   }
 });
