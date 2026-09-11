@@ -1,3 +1,4 @@
+```cpp
 // node_bridge.cpp
 //
 // Native bridge for embedded Node.js (nodejs-mobile v18.20.4).
@@ -15,6 +16,16 @@
 //       v
 //   node::Start()
 //
+// Native -> Dart communication:
+//
+//   Node / native pthread
+//       |
+//       v
+//   Dart_PostCObject_DL()
+//       |
+//       v
+//   Dart ReceivePort
+//
 // There is NO JNI dependency.
 //
 // IMPORTANT:
@@ -31,9 +42,15 @@
 //   Therefore we declare the function ourselves and link against
 //   libnode.so directly.
 //
-// Callback memory:
-//   The bridge allocates callback buffers with malloc().
-//   Dart must call ncm_node_free_buffer() after copying the data.
+// IMPORTANT:
+//   We do NOT use Pointer.fromFunction() / Dart native callbacks here.
+//
+//   stdout/stderr reader threads are native pthreads and cannot directly
+//   invoke a Dart callback trampoline.
+//
+//   Instead, Dart initializes the Dart API DL and provides a SendPort ID.
+//   Native threads use Dart_PostCObject_DL() to deliver messages into the
+//   Dart isolate.
 //
 // ---------------------------------------------------------------------------
 
@@ -49,6 +66,8 @@
 #include <vector>
 
 #include <unistd.h>
+
+#include <dart_api_dl.h>
 
 
 #define LOG_TAG "NcmNodeBridge"
@@ -77,9 +96,6 @@
 //
 // We intentionally declare it here instead of including node.h.
 //
-// This bridge is therefore tied to a libnode.so whose ABI provides exactly
-// this symbol/signature.
-//
 // ===========================================================================
 
 namespace node {
@@ -95,38 +111,55 @@ int Start(int argc, char** argv);
 
 extern "C" {
 
-typedef void (*ncm_node_output_callback)(
-    const unsigned char* data,
-    size_t length
+
+// ---------------------------------------------------------------------------
+// Dart API initialization
+// ---------------------------------------------------------------------------
+//
+// Dart calls:
+//
+//     ncm_node_initialize_dart_api(
+//         NativeApi.initializeApiDLData
+//     );
+//
+// Native then calls:
+//
+//     Dart_InitializeApiDL(data);
+//
+// Return:
+//     0 on success
+//     non-zero on failure
+//
+intptr_t ncm_node_initialize_dart_api(
+    void* data
 );
 
-typedef void (*ncm_node_error_callback)(
-    const unsigned char* data,
-    size_t length
+
+// ---------------------------------------------------------------------------
+// Dart native port
+// ---------------------------------------------------------------------------
+//
+// Dart passes:
+//
+//     ReceivePort.sendPort.nativePort
+//
+// Native stores the port ID and uses Dart_PostCObject_DL() from native
+// threads to deliver messages to the Dart isolate.
+//
+// ---------------------------------------------------------------------------
+
+void ncm_node_set_dart_port(
+    int64_t port
 );
 
 
-// Register callbacks.
-//
-// stdout_callback:
-//   Called whenever a complete stdout line is received.
-//
-// stderr_callback:
-//   Called whenever stderr data is received.
-//
-// Callbacks may be invoked from native reader threads.
-void ncm_node_set_callbacks(
-    ncm_node_output_callback stdout_callback,
-    ncm_node_error_callback stderr_callback
-);
-
-
+// ---------------------------------------------------------------------------
 // Start embedded Node.
 //
 // argv follows the normal C argv convention:
 //
 //   argv[0] = "node"
-//   argv[1] = "/path/to/bridge.js"
+//   argv[1] = "/path/to/bundle.js"
 //   ...
 //
 // ncm_node_start() itself returns immediately after creating the
@@ -135,12 +168,15 @@ void ncm_node_set_callbacks(
 // Return:
 //    0  success
 //   -1  already started / invalid arguments / pthread failure
+// ---------------------------------------------------------------------------
+
 int ncm_node_start(
     int argc,
     const char* const* argv
 );
 
 
+// ---------------------------------------------------------------------------
 // Write bytes to Node's stdin.
 //
 // This function does NOT append '\n'.
@@ -148,35 +184,35 @@ int ncm_node_start(
 // Return:
 //    0  success
 //   -1  failure
+// ---------------------------------------------------------------------------
+
 int ncm_node_write_stdin(
     const unsigned char* data,
     size_t length
 );
 
 
+// ---------------------------------------------------------------------------
 // Request shutdown.
 //
 // The current embedded Node design does not expose a reliable clean
 // shutdown mechanism.
 //
-// Therefore this is currently a no-op.
+// Therefore this remains a no-op for now.
+// ---------------------------------------------------------------------------
+
 void ncm_node_request_shutdown();
 
 
+// ---------------------------------------------------------------------------
 // Query whether node::Start() is currently running.
 //
 // Return:
 //   1 running
 //   0 not running
+// ---------------------------------------------------------------------------
+
 int ncm_node_is_running();
-
-
-// Free memory passed to an output callback.
-//
-// Dart MUST call this after copying callback data.
-void ncm_node_free_buffer(
-    const unsigned char* data
-);
 
 } // extern "C"
 
@@ -187,8 +223,21 @@ void ncm_node_free_buffer(
 
 static std::atomic<bool> g_started{false};
 
-static ncm_node_output_callback g_stdout_callback = nullptr;
-static ncm_node_error_callback g_stderr_callback = nullptr;
+
+// ---------------------------------------------------------------------------
+// Dart native port
+// ---------------------------------------------------------------------------
+//
+// This is intentionally Dart_Port_DL rather than a Dart callback pointer.
+//
+// Dart_PostCObject_DL() is safe to call from native threads after the Dart
+// API DL has been initialized.
+//
+// ---------------------------------------------------------------------------
+
+static std::atomic<Dart_Port_DL> g_dart_port{
+    ILLEGAL_PORT
+};
 
 
 // stdout pipe:
@@ -232,70 +281,195 @@ static pthread_t g_thread_err;
 
 
 // ===========================================================================
-// Callback helper
+// Dart message helper
+// ===========================================================================
+//
+// Message format:
+//
+//   [ "stdout", "<text>" ]
+//
+// or:
+//
+//   [ "stderr", "<text>" ]
+//
+// Dart receives this through ReceivePort.
+//
+//
+// IMPORTANT:
+//
+// Dart_PostCObject_DL() copies the Dart_CObject contents into the message
+// that is posted to the isolate. Therefore the strings only need to remain
+// valid for the duration of this call.
+//
 // ===========================================================================
 
-static void emit_callback(
-    ncm_node_output_callback callback,
+static bool post_dart_message(
+    const char* type,
     const char* data,
     size_t length
 ) {
-    if (callback == nullptr || data == nullptr || length == 0) {
-        return;
+    if (type == nullptr ||
+        data == nullptr ||
+        length == 0) {
+        return false;
     }
 
-    //
-    // NativeCallable.listener() is asynchronous.
-    //
-    // Therefore the memory cannot point into a temporary std::string or
-    // stack buffer.
-    //
-    // Allocate stable memory and let Dart explicitly free it.
-    //
-    unsigned char* copy =
-        static_cast<unsigned char*>(std::malloc(length));
 
-    if (copy == nullptr) {
-        LOGE(
-            "malloc(%zu) failed while emitting callback",
-            length
+    const Dart_Port_DL port =
+        g_dart_port.load(std::memory_order_acquire);
+
+
+    if (port == ILLEGAL_PORT) {
+        LOGW(
+            "cannot post native message: Dart port is not initialized"
         );
 
-        return;
+        return false;
     }
 
-    std::memcpy(copy, data, length);
 
-    callback(copy, length);
+    //
+    // Dart_CObject strings require a NUL-terminated C string.
+    //
+    // stdout/stderr data is not necessarily NUL terminated.
+    //
+    std::string text(
+        data,
+        length
+    );
+
+
+    Dart_CObject type_object;
+
+    type_object.type =
+        Dart_CObject_kString;
+
+    type_object.value.as_string =
+        const_cast<char*>(type);
+
+
+    Dart_CObject data_object;
+
+    data_object.type =
+        Dart_CObject_kString;
+
+    data_object.value.as_string =
+        const_cast<char*>(text.c_str());
+
+
+    Dart_CObject* values[2] = {
+        &type_object,
+        &data_object,
+    };
+
+
+    Dart_CObject message;
+
+    message.type =
+        Dart_CObject_kArray;
+
+    message.value.as_array.values =
+        values;
+
+    message.value.as_array.length =
+        2;
+
+
+    const bool result =
+        Dart_PostCObject_DL(
+            port,
+            &message
+        );
+
+
+    if (!result) {
+        LOGW(
+            "Dart_PostCObject_DL failed"
+        );
+    }
+
+
+    return result;
+}
+
+
+// ===========================================================================
+// stdout emitter
+// ===========================================================================
+
+static void emit_stdout(
+    const char* data,
+    size_t length
+) {
+    post_dart_message(
+        "stdout",
+        data,
+        length
+    );
+}
+
+
+// ===========================================================================
+// stderr emitter
+// ===========================================================================
+
+static void emit_stderr(
+    const char* data,
+    size_t length
+) {
+    post_dart_message(
+        "stderr",
+        data,
+        length
+    );
 }
 
 
 // ===========================================================================
 // stdout reader
 // ===========================================================================
+//
+// stdout is line-framed here.
+//
+// This is intentional because the Node bridge protocol is NDJSON:
+//
+//     one JSON object per line
+//
+// Dart still keeps NdjsonLineSplitter so the transport contract remains
+// robust and equivalent to DesktopNcmBridge.
+//
+// ===========================================================================
 
 static void* stdout_reader_thread(void*) {
     char buffer[8192];
 
     std::string line_buffer;
-    line_buffer.reserve(8192);
+
+    line_buffer.reserve(
+        sizeof(buffer)
+    );
+
 
     while (true) {
-        ssize_t n = read(
-            g_pipe_out[0],
-            buffer,
-            sizeof(buffer)
-        );
+        const ssize_t n =
+            read(
+                g_pipe_out[0],
+                buffer,
+                sizeof(buffer)
+            );
+
 
         if (n == 0) {
             // EOF.
             break;
         }
 
+
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
             }
+
 
             LOGE(
                 "stdout read failed: %s",
@@ -305,20 +479,28 @@ static void* stdout_reader_thread(void*) {
             break;
         }
 
+
         line_buffer.append(
             buffer,
             static_cast<size_t>(n)
         );
 
+
         size_t start = 0;
+
 
         while (true) {
             const size_t eol =
-                line_buffer.find('\n', start);
+                line_buffer.find(
+                    '\n',
+                    start
+                );
+
 
             if (eol == std::string::npos) {
                 break;
             }
+
 
             std::string line =
                 line_buffer.substr(
@@ -326,36 +508,44 @@ static void* stdout_reader_thread(void*) {
                     eol - start
                 );
 
+
             // Remove CR from CRLF.
             if (!line.empty() &&
                 line.back() == '\r') {
                 line.pop_back();
             }
 
+
             if (!line.empty()) {
-                emit_callback(
-                    g_stdout_callback,
+                emit_stdout(
                     line.data(),
                     line.size()
                 );
             }
 
-            start = eol + 1;
+
+            start =
+                eol + 1;
         }
 
+
         if (start != 0) {
-            line_buffer.erase(0, start);
+            line_buffer.erase(
+                0,
+                start
+            );
         }
     }
 
-    // Flush the final unterminated line, if any.
+
+    // Flush final unterminated line.
     if (!line_buffer.empty()) {
-        emit_callback(
-            g_stdout_callback,
+        emit_stdout(
             line_buffer.data(),
             line_buffer.size()
         );
     }
+
 
     return nullptr;
 }
@@ -364,25 +554,37 @@ static void* stdout_reader_thread(void*) {
 // ===========================================================================
 // stderr reader
 // ===========================================================================
+//
+// stderr is intentionally not line-framed.
+//
+// Node may write arbitrary chunks here and Dart simply exposes them as log
+// events.
+//
+// ===========================================================================
 
 static void* stderr_reader_thread(void*) {
     char buffer[8192];
 
+
     while (true) {
-        ssize_t n = read(
-            g_pipe_err[0],
-            buffer,
-            sizeof(buffer)
-        );
+        const ssize_t n =
+            read(
+                g_pipe_err[0],
+                buffer,
+                sizeof(buffer)
+            );
+
 
         if (n == 0) {
             break;
         }
 
+
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
             }
+
 
             LOGE(
                 "stderr read failed: %s",
@@ -392,12 +594,13 @@ static void* stderr_reader_thread(void*) {
             break;
         }
 
-        emit_callback(
-            g_stderr_callback,
+
+        emit_stderr(
             buffer,
             static_cast<size_t>(n)
         );
     }
+
 
     return nullptr;
 }
@@ -408,12 +611,14 @@ static void* stderr_reader_thread(void*) {
 // ===========================================================================
 
 static int redirect_stdout_stderr() {
+
     setvbuf(
         stdout,
         nullptr,
         _IONBF,
         0
     );
+
 
     if (pipe(g_pipe_out) != 0) {
         LOGE(
@@ -423,6 +628,7 @@ static int redirect_stdout_stderr() {
 
         return -1;
     }
+
 
     if (dup2(
             g_pipe_out[1],
@@ -437,7 +643,11 @@ static int redirect_stdout_stderr() {
         return -1;
     }
 
-    close(g_pipe_out[1]);
+
+    close(
+        g_pipe_out[1]
+    );
+
     g_pipe_out[1] = -1;
 
 
@@ -448,6 +658,7 @@ static int redirect_stdout_stderr() {
         0
     );
 
+
     if (pipe(g_pipe_err) != 0) {
         LOGE(
             "pipe(stderr) failed: %s",
@@ -456,6 +667,7 @@ static int redirect_stdout_stderr() {
 
         return -1;
     }
+
 
     if (dup2(
             g_pipe_err[1],
@@ -470,7 +682,11 @@ static int redirect_stdout_stderr() {
         return -1;
     }
 
-    close(g_pipe_err[1]);
+
+    close(
+        g_pipe_err[1]
+    );
+
     g_pipe_err[1] = -1;
 
 
@@ -481,7 +697,9 @@ static int redirect_stdout_stderr() {
             nullptr
         ) != 0) {
 
-        LOGE("failed to create stdout reader");
+        LOGE(
+            "failed to create stdout reader"
+        );
 
         return -1;
     }
@@ -494,14 +712,22 @@ static int redirect_stdout_stderr() {
             nullptr
         ) != 0) {
 
-        LOGE("failed to create stderr reader");
+        LOGE(
+            "failed to create stderr reader"
+        );
 
         return -1;
     }
 
 
-    pthread_detach(g_thread_out);
-    pthread_detach(g_thread_err);
+    pthread_detach(
+        g_thread_out
+    );
+
+    pthread_detach(
+        g_thread_err
+    );
+
 
     return 0;
 }
@@ -512,6 +738,7 @@ static int redirect_stdout_stderr() {
 // ===========================================================================
 
 static int redirect_stdin() {
+
     if (pipe(g_pipe_in) != 0) {
         LOGE(
             "pipe(stdin) failed: %s",
@@ -520,6 +747,7 @@ static int redirect_stdin() {
 
         return -1;
     }
+
 
     if (dup2(
             g_pipe_in[0],
@@ -534,8 +762,13 @@ static int redirect_stdin() {
         return -1;
     }
 
-    close(g_pipe_in[0]);
+
+    close(
+        g_pipe_in[0]
+    );
+
     g_pipe_in[0] = -1;
+
 
     return 0;
 }
@@ -547,9 +780,14 @@ static int redirect_stdin() {
 
 struct StartArgs {
     int argc;
+
     std::vector<std::string> argv;
 };
 
+
+// ---------------------------------------------------------------------------
+// Node thread entry
+// ---------------------------------------------------------------------------
 
 static void* node_thread_main(void* arg) {
     StartArgs* args =
@@ -562,19 +800,29 @@ static void* node_thread_main(void* arg) {
 
     size_t total_size = 0;
 
+
     for (const std::string& value : args->argv) {
-        total_size += value.size() + 1;
+        total_size +=
+            value.size() + 1;
     }
+
 
     char* buffer =
         static_cast<char*>(
-            std::calloc(total_size, 1)
+            std::calloc(
+                total_size,
+                1
+            )
         );
 
+
     if (buffer == nullptr) {
-        LOGE("failed to allocate argv buffer");
+        LOGE(
+            "failed to allocate argv buffer"
+        );
 
         delete args;
+
         g_started = false;
 
         return nullptr;
@@ -582,12 +830,19 @@ static void* node_thread_main(void* arg) {
 
 
     std::vector<char*> argv;
-    argv.reserve(args->argv.size());
+
+    argv.reserve(
+        args->argv.size()
+    );
+
 
     char* cursor = buffer;
 
+
     for (const std::string& value : args->argv) {
-        const size_t size = value.size();
+        const size_t size =
+            value.size();
+
 
         std::memcpy(
             cursor,
@@ -595,18 +850,25 @@ static void* node_thread_main(void* arg) {
             size + 1
         );
 
-        argv.push_back(cursor);
 
-        cursor += size + 1;
+        argv.push_back(
+            cursor
+        );
+
+
+        cursor +=
+            size + 1;
     }
 
 
     // -----------------------------------------------------------------------
-    // These must happen BEFORE node::Start().
+    // Redirect stdio BEFORE node::Start().
     // -----------------------------------------------------------------------
 
     if (redirect_stdout_stderr() != 0) {
-        LOGE("stdout/stderr redirection failed");
+        LOGE(
+            "stdout/stderr redirection failed"
+        );
 
         std::free(buffer);
         delete args;
@@ -618,7 +880,9 @@ static void* node_thread_main(void* arg) {
 
 
     if (redirect_stdin() != 0) {
-        LOGE("stdin redirection failed");
+        LOGE(
+            "stdin redirection failed"
+        );
 
         std::free(buffer);
         delete args;
@@ -662,9 +926,12 @@ static void* node_thread_main(void* arg) {
 
 
     std::free(buffer);
+
     delete args;
 
+
     g_started = false;
+
 
     return nullptr;
 }
@@ -676,21 +943,91 @@ static void* node_thread_main(void* arg) {
 
 extern "C" {
 
-void ncm_node_set_callbacks(
-    ncm_node_output_callback stdout_callback,
-    ncm_node_error_callback stderr_callback
+
+// ---------------------------------------------------------------------------
+// Dart API DL
+// ---------------------------------------------------------------------------
+
+intptr_t ncm_node_initialize_dart_api(
+    void* data
 ) {
-    g_stdout_callback = stdout_callback;
-    g_stderr_callback = stderr_callback;
+    if (data == nullptr) {
+        LOGE(
+            "ncm_node_initialize_dart_api: data is null"
+        );
+
+        return -1;
+    }
+
+
+    const intptr_t result =
+        Dart_InitializeApiDL(
+            data
+        );
+
+
+    if (result != 0) {
+        LOGE(
+            "Dart_InitializeApiDL failed: %ld",
+            static_cast<long>(result)
+        );
+    } else {
+        LOGI(
+            "Dart API DL initialized"
+        );
+    }
+
+
+    return result;
 }
 
+
+// ---------------------------------------------------------------------------
+// Dart port
+// ---------------------------------------------------------------------------
+
+void ncm_node_set_dart_port(
+    int64_t port
+) {
+    g_dart_port.store(
+        static_cast<Dart_Port_DL>(port),
+        std::memory_order_release
+    );
+
+
+    LOGI(
+        "Dart native port set: %lld",
+        static_cast<long long>(port)
+    );
+}
+
+
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
 
 int ncm_node_start(
     int argc,
     const char* const* argv
 ) {
-    if (argc <= 0 || argv == nullptr) {
-        LOGE("ncm_node_start: invalid arguments");
+    if (argc <= 0 ||
+        argv == nullptr) {
+
+        LOGE(
+            "ncm_node_start: invalid arguments"
+        );
+
+        return -1;
+    }
+
+
+    if (g_dart_port.load(
+            std::memory_order_acquire
+        ) == ILLEGAL_PORT) {
+
+        LOGE(
+            "ncm_node_start: Dart port is not initialized"
+        );
 
         return -1;
     }
@@ -705,9 +1042,12 @@ int ncm_node_start(
     }
 
 
-    StartArgs* args = new StartArgs();
+    StartArgs* args =
+        new StartArgs();
+
 
     args->argc = argc;
+
 
     args->argv.reserve(
         static_cast<size_t>(argc)
@@ -715,24 +1055,29 @@ int ncm_node_start(
 
 
     for (int i = 0; i < argc; ++i) {
+
         if (argv[i] == nullptr) {
-            delete args;
-
-            g_started = false;
-
             LOGE(
                 "ncm_node_start: argv[%d] is null",
                 i
             );
 
+            delete args;
+
+            g_started = false;
+
             return -1;
         }
 
-        args->argv.emplace_back(argv[i]);
+
+        args->argv.emplace_back(
+            argv[i]
+        );
     }
 
 
     pthread_t thread;
+
 
     const int rc =
         pthread_create(
@@ -741,6 +1086,7 @@ int ncm_node_start(
             node_thread_main,
             args
         );
+
 
     if (rc != 0) {
         LOGE(
@@ -756,19 +1102,29 @@ int ncm_node_start(
     }
 
 
-    pthread_detach(thread);
+    pthread_detach(
+        thread
+    );
+
 
     return 0;
 }
 
 
+// ---------------------------------------------------------------------------
+// stdin
+// ---------------------------------------------------------------------------
+
 int ncm_node_write_stdin(
     const unsigned char* data,
     size_t length
 ) {
-    if (data == nullptr && length != 0) {
+    if (data == nullptr &&
+        length != 0) {
+
         return -1;
     }
+
 
     if (g_pipe_in[1] < 0) {
         LOGE(
@@ -781,18 +1137,22 @@ int ncm_node_write_stdin(
 
     size_t offset = 0;
 
+
     while (offset < length) {
-        ssize_t n =
+
+        const ssize_t n =
             write(
                 g_pipe_in[1],
                 data + offset,
                 length - offset
             );
 
+
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
             }
+
 
             LOGE(
                 "write(stdin) failed: %s",
@@ -802,7 +1162,18 @@ int ncm_node_write_stdin(
             return -1;
         }
 
-        offset += static_cast<size_t>(n);
+
+        if (n == 0) {
+            LOGE(
+                "write(stdin) returned zero"
+            );
+
+            return -1;
+        }
+
+
+        offset +=
+            static_cast<size_t>(n);
     }
 
 
@@ -810,29 +1181,35 @@ int ncm_node_write_stdin(
 }
 
 
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
 void ncm_node_request_shutdown() {
     //
-    // node::Start() currently has no clean shutdown API in this design.
+    // Node's current embedded startup does not expose a reliable clean
+    // shutdown API.
+    //
+    // Keep this as a no-op for now.
     //
     LOGW(
-        "shutdown requested, but embedded Node has no clean shutdown"
+        "shutdown requested, but embedded Node "
+        "has no clean shutdown API"
     );
 }
 
 
+// ---------------------------------------------------------------------------
+// Running state
+// ---------------------------------------------------------------------------
+
 int ncm_node_is_running() {
-    return g_started.load()
+    return g_started.load(
+        std::memory_order_acquire
+    )
         ? 1
         : 0;
 }
 
-
-void ncm_node_free_buffer(
-    const unsigned char* data
-) {
-    std::free(
-        const_cast<unsigned char*>(data)
-    );
-}
-
 } // extern "C"
+```
