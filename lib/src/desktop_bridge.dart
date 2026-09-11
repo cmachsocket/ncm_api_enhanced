@@ -204,6 +204,11 @@ class DesktopNcmBridge implements NcmBridge {
         await outputFile.writeAsBytes(bytes, flush: false);
 
         extractedFiles++;
+
+        stderr.writeln(
+          '[DesktopNcmBridge] extracted: $assetKey -> '
+          '${outputFile.path}',
+        );
       }
 
       if (extractedFiles == 0) {
@@ -214,6 +219,8 @@ class DesktopNcmBridge implements NcmBridge {
       }
 
       _validateExtractedBridge(tmp);
+
+      stderr.writeln('[DesktopNcmBridge] bridge extracted to: ${tmp.path}');
 
       return tmp;
     } catch (error, stackTrace) {
@@ -324,6 +331,12 @@ class DesktopNcmBridge implements NcmBridge {
         );
       }
 
+      stderr.writeln('[DesktopNcmBridge] starting Node:');
+      stderr.writeln('[DesktopNcmBridge] executable: $nodeExecutable');
+      stderr.writeln('[DesktopNcmBridge] workingDirectory: $root');
+      stderr.writeln('[DesktopNcmBridge] bundle: ${bridgeJs.path}');
+      stderr.writeln('[DesktopNcmBridge] worker: ${syncWorker.path}');
+
       // -----------------------------------------------------------------------
       // Start Node.
       //
@@ -340,6 +353,8 @@ class DesktopNcmBridge implements NcmBridge {
 
       final proc = _proc!;
 
+      stderr.writeln('[DesktopNcmBridge] Node process started.');
+
       // -----------------------------------------------------------------------
       // stdout
       // -----------------------------------------------------------------------
@@ -349,6 +364,11 @@ class DesktopNcmBridge implements NcmBridge {
           .listen(
             _handleStdout,
             onError: (Object error, StackTrace stackTrace) {
+              stderr.writeln(
+                '[DesktopNcmBridge][stdout error] '
+                '$error',
+              );
+
               if (_events.isClosed) {
                 return;
               }
@@ -369,6 +389,14 @@ class DesktopNcmBridge implements NcmBridge {
           .transform(utf8.decoder)
           .listen(
             (String text) {
+              // IMPORTANT:
+              //
+              // Do not only put this into bridgeEvents.
+              //
+              // If Node exits before Flutter receives "ready", this is often
+              // the only useful diagnostic information.
+              stderr.writeln('[DesktopNcmBridge][node stderr] $text');
+
               if (_events.isClosed) {
                 return;
               }
@@ -379,6 +407,11 @@ class DesktopNcmBridge implements NcmBridge {
               });
             },
             onError: (Object error, StackTrace stackTrace) {
+              stderr.writeln(
+                '[DesktopNcmBridge][stderr error] '
+                '$error',
+              );
+
               if (_events.isClosed) {
                 return;
               }
@@ -394,7 +427,11 @@ class DesktopNcmBridge implements NcmBridge {
       // Process exit
       // -----------------------------------------------------------------------
 
-      proc.exitCode.then(_onNodeExit);
+      proc.exitCode.then((int code) {
+        stderr.writeln('[DesktopNcmBridge] Node exited with code $code');
+
+        _onNodeExit(code);
+      });
 
       // -----------------------------------------------------------------------
       // Wait for bundle.js readiness.
@@ -414,6 +451,8 @@ class DesktopNcmBridge implements NcmBridge {
           );
         },
       );
+
+      stderr.writeln('[DesktopNcmBridge] Node bridge is ready.');
     } catch (_) {
       await _abortStart();
       rethrow;
@@ -425,6 +464,17 @@ class DesktopNcmBridge implements NcmBridge {
   // ===========================================================================
 
   void _handleStdout(String chunk) {
+    // IMPORTANT:
+    //
+    // stdout is the actual NDJSON protocol channel.
+    //
+    // Log it to stderr so debugging output does not contaminate the
+    // Node stdout protocol itself.
+    stderr.writeln(
+      '[DesktopNcmBridge][node stdout] '
+      '${chunk.replaceAll('\n', '\\n')}',
+    );
+
     if (_events.isClosed) {
       return;
     }
@@ -435,6 +485,8 @@ class DesktopNcmBridge implements NcmBridge {
   }
 
   void _handleStdoutDone() {
+    stderr.writeln('[DesktopNcmBridge] Node stdout closed.');
+
     if (_events.isClosed) {
       return;
     }
@@ -444,11 +496,11 @@ class DesktopNcmBridge implements NcmBridge {
       _dispatch(event);
     }
 
-    // exitCode is normally authoritative.
+    // DO NOT call _onNodeExit(0) here.
     //
-    // Keep this as a fallback because stdout may close before the process
-    // exit future is observed.
-    //_onNodeExit(0);
+    // stdout closing is not authoritative.
+    //
+    // Process.exitCode is the authoritative process lifecycle signal.
   }
 
   void _dispatch(NdjsonEvent event) {
@@ -457,6 +509,12 @@ class DesktopNcmBridge implements NcmBridge {
       pending: _pending,
       eventsCtl: _events,
       onFatal: (message, cause) {
+        stderr.writeln(
+          '[DesktopNcmBridge] protocol fatal: '
+          '$message'
+          '${cause == null ? '' : ' ($cause)'}',
+        );
+
         _pending.rejectAll(BridgeError('node fatal: $message', cause));
       },
     );
@@ -470,6 +528,8 @@ class DesktopNcmBridge implements NcmBridge {
     if (value['event'] != 'ready') {
       return;
     }
+
+    stderr.writeln('[DesktopNcmBridge] received ready event: $value');
 
     final completer = _readyCompleter;
 
@@ -488,6 +548,8 @@ class DesktopNcmBridge implements NcmBridge {
     }
 
     _nodeExitHandled = true;
+
+    stderr.writeln('[DesktopNcmBridge] handling Node exit: code=$code');
 
     final ready = _readyCompleter;
 
@@ -515,6 +577,8 @@ class DesktopNcmBridge implements NcmBridge {
   // ===========================================================================
 
   Future<void> _abortStart() async {
+    stderr.writeln('[DesktopNcmBridge] aborting Node bridge startup.');
+
     _started = false;
 
     final proc = _proc;
@@ -536,6 +600,11 @@ class DesktopNcmBridge implements NcmBridge {
     _extractedBridgeDir = null;
 
     if (tmp != null) {
+      stderr.writeln(
+        '[DesktopNcmBridge] deleting temporary bridge: '
+        '${tmp.path}',
+      );
+
       try {
         await tmp.delete(recursive: true);
       } catch (_) {}
@@ -567,6 +636,11 @@ class DesktopNcmBridge implements NcmBridge {
       'method': method,
       'params': params ?? <String, dynamic>{},
     });
+
+    stderr.writeln(
+      '[DesktopNcmBridge] -> Node '
+      'id=$id method=$method',
+    );
 
     try {
       proc.stdin.writeln(payload);
@@ -600,6 +674,8 @@ class DesktopNcmBridge implements NcmBridge {
 
   @override
   Future<void> shutdown() async {
+    stderr.writeln('[DesktopNcmBridge] shutdown requested.');
+
     final proc = _proc;
 
     _proc = null;
@@ -634,9 +710,16 @@ class DesktopNcmBridge implements NcmBridge {
     _extractedBridgeDir = null;
 
     if (tmp != null) {
+      stderr.writeln(
+        '[DesktopNcmBridge] deleting temporary bridge: '
+        '${tmp.path}',
+      );
+
       try {
         await tmp.delete(recursive: true);
       } catch (_) {}
     }
+
+    stderr.writeln('[DesktopNcmBridge] shutdown complete.');
   }
 }
