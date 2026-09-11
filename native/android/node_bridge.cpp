@@ -1,4 +1,4 @@
-// node_bridge.cpp
+// native/android/node_bridge.cpp
 //
 // Native bridge for embedded Node.js (nodejs-mobile v18.20.4).
 //
@@ -69,6 +69,10 @@
 #include <dart_api_dl.h>
 
 
+// ===========================================================================
+// Logging
+// ===========================================================================
+
 #define LOG_TAG "NcmNodeBridge"
 
 #define LOGI(...) \
@@ -114,21 +118,7 @@ extern "C" {
 // ---------------------------------------------------------------------------
 // Dart API initialization
 // ---------------------------------------------------------------------------
-//
-// Dart calls:
-//
-//     ncm_node_initialize_dart_api(
-//         NativeApi.initializeApiDLData
-//     );
-//
-// Native then calls:
-//
-//     Dart_InitializeApiDL(data);
-//
-// Return:
-//     0 on success
-//     non-zero on failure
-//
+
 intptr_t ncm_node_initialize_dart_api(
     void* data
 );
@@ -137,15 +127,6 @@ intptr_t ncm_node_initialize_dart_api(
 // ---------------------------------------------------------------------------
 // Dart native port
 // ---------------------------------------------------------------------------
-//
-// Dart passes:
-//
-//     ReceivePort.sendPort.nativePort
-//
-// Native stores the port ID and uses Dart_PostCObject_DL() from native
-// threads to deliver messages to the Dart isolate.
-//
-// ---------------------------------------------------------------------------
 
 void ncm_node_set_dart_port(
     int64_t port
@@ -153,20 +134,7 @@ void ncm_node_set_dart_port(
 
 
 // ---------------------------------------------------------------------------
-// Start embedded Node.
-//
-// argv follows the normal C argv convention:
-//
-//   argv[0] = "node"
-//   argv[1] = "/path/to/bundle.js"
-//   ...
-//
-// ncm_node_start() itself returns immediately after creating the
-// Node thread.
-//
-// Return:
-//    0  success
-//   -1  already started / invalid arguments / pthread failure
+// Start embedded Node
 // ---------------------------------------------------------------------------
 
 int ncm_node_start(
@@ -176,13 +144,7 @@ int ncm_node_start(
 
 
 // ---------------------------------------------------------------------------
-// Write bytes to Node's stdin.
-//
-// This function does NOT append '\n'.
-//
-// Return:
-//    0  success
-//   -1  failure
+// Write bytes to Node stdin
 // ---------------------------------------------------------------------------
 
 int ncm_node_write_stdin(
@@ -192,23 +154,14 @@ int ncm_node_write_stdin(
 
 
 // ---------------------------------------------------------------------------
-// Request shutdown.
-//
-// The current embedded Node design does not expose a reliable clean
-// shutdown mechanism.
-//
-// Therefore this remains a no-op for now.
+// Request shutdown
 // ---------------------------------------------------------------------------
 
 void ncm_node_request_shutdown();
 
 
 // ---------------------------------------------------------------------------
-// Query whether node::Start() is currently running.
-//
-// Return:
-//   1 running
-//   0 not running
+// Query running state
 // ---------------------------------------------------------------------------
 
 int ncm_node_is_running();
@@ -226,53 +179,40 @@ static std::atomic<bool> g_started{false};
 // ---------------------------------------------------------------------------
 // Dart native port
 // ---------------------------------------------------------------------------
-//
-// This is intentionally Dart_Port_DL rather than a Dart callback pointer.
-//
-// Dart_PostCObject_DL() is safe to call from native threads after the Dart
-// API DL has been initialized.
-//
-// ---------------------------------------------------------------------------
 
 static std::atomic<Dart_Port_DL> g_dart_port{
     ILLEGAL_PORT
 };
 
 
-// stdout pipe:
-//
-//   Node stdout
-//       |
-//       v
-//   g_pipe_out[1]
-//       |
-//       v
-//   g_pipe_out[0]
-//       |
-//       v
-//   stdout reader thread
-//
-static int g_pipe_out[2] = {-1, -1};
+// ---------------------------------------------------------------------------
+// stdout pipe
+// ---------------------------------------------------------------------------
+
+static int g_pipe_out[2] = {
+    -1,
+    -1
+};
 
 
-// stderr pipe.
-static int g_pipe_err[2] = {-1, -1};
+// ---------------------------------------------------------------------------
+// stderr pipe
+// ---------------------------------------------------------------------------
+
+static int g_pipe_err[2] = {
+    -1,
+    -1
+};
 
 
-// stdin pipe:
-//
-//   Dart
-//       |
-//       v
-//   g_pipe_in[1]
-//       |
-//       v
-//   g_pipe_in[0]
-//       |
-//       v
-//   Node stdin
-//
-static int g_pipe_in[2] = {-1, -1};
+// ---------------------------------------------------------------------------
+// stdin pipe
+// ---------------------------------------------------------------------------
+
+static int g_pipe_in[2] = {
+    -1,
+    -1
+};
 
 
 static pthread_t g_thread_out;
@@ -283,22 +223,13 @@ static pthread_t g_thread_err;
 // Dart message helper
 // ===========================================================================
 //
-// Message format:
+// Message:
 //
-//   [ "stdout", "<text>" ]
+//     [ "stdout", "<text>" ]
 //
 // or:
 //
-//   [ "stderr", "<text>" ]
-//
-// Dart receives this through ReceivePort.
-//
-//
-// IMPORTANT:
-//
-// Dart_PostCObject_DL() copies the Dart_CObject contents into the message
-// that is posted to the isolate. Therefore the strings only need to remain
-// valid for the duration of this call.
+//     [ "stderr", "<text>" ]
 //
 // ===========================================================================
 
@@ -310,17 +241,29 @@ static bool post_dart_message(
     if (type == nullptr ||
         data == nullptr ||
         length == 0) {
+
+        LOGE(
+            "post_dart_message: invalid arguments "
+            "type=%p data=%p length=%zu",
+            type,
+            data,
+            length
+        );
+
         return false;
     }
 
 
     const Dart_Port_DL port =
-        g_dart_port.load(std::memory_order_acquire);
+        g_dart_port.load(
+            std::memory_order_acquire
+        );
 
 
     if (port == ILLEGAL_PORT) {
-        LOGW(
-            "cannot post native message: Dart port is not initialized"
+
+        LOGE(
+            "post_dart_message: Dart port is ILLEGAL_PORT"
         );
 
         return false;
@@ -328,9 +271,9 @@ static bool post_dart_message(
 
 
     //
-    // Dart_CObject strings require a NUL-terminated C string.
+    // Dart_CObject_kString requires a NUL-terminated string.
     //
-    // stdout/stderr data is not necessarily NUL terminated.
+    // Make an owned temporary copy.
     //
     std::string text(
         data,
@@ -344,7 +287,9 @@ static bool post_dart_message(
         Dart_CObject_kString;
 
     type_object.value.as_string =
-        const_cast<char*>(type);
+        const_cast<char*>(
+            type
+        );
 
 
     Dart_CObject data_object;
@@ -353,7 +298,9 @@ static bool post_dart_message(
         Dart_CObject_kString;
 
     data_object.value.as_string =
-        const_cast<char*>(text.c_str());
+        const_cast<char*>(
+            text.c_str()
+        );
 
 
     Dart_CObject* values[2] = {
@@ -374,6 +321,14 @@ static bool post_dart_message(
         2;
 
 
+    LOGE(
+        "POST -> DART: type=%s length=%zu port=%lld",
+        type,
+        length,
+        static_cast<long long>(port)
+    );
+
+
     const bool result =
         Dart_PostCObject_DL(
             port,
@@ -381,9 +336,20 @@ static bool post_dart_message(
         );
 
 
+    LOGE(
+        "POST <- DART: type=%s result=%s",
+        type,
+        result ? "true" : "false"
+    );
+
+
     if (!result) {
-        LOGW(
-            "Dart_PostCObject_DL failed"
+
+        LOGE(
+            "Dart_PostCObject_DL FAILED: "
+            "type=%s length=%zu",
+            type,
+            length
         );
     }
 
@@ -395,17 +361,55 @@ static bool post_dart_message(
 // ===========================================================================
 // stdout emitter
 // ===========================================================================
+//
+// Node bridge protocol is NDJSON:
+//
+//     one JSON object per line
+//
+// Native strips the original newline while parsing the pipe, then adds
+// exactly one newline back before sending the message to Dart.
+//
+// This keeps NdjsonLineSplitter on the Dart side working normally.
+//
+// ===========================================================================
 
 static void emit_stdout(
     const char* data,
     size_t length
 ) {
-    if (data == nullptr || length == 0) {
+    if (data == nullptr ||
+        length == 0) {
+
+        LOGW(
+            "emit_stdout: empty data"
+        );
+
         return;
     }
 
-    std::string framed(data, length);
-    framed.push_back('\n');
+
+    LOGE(
+        "emit_stdout: Node stdout line length=%zu",
+        length
+    );
+
+
+    std::string framed(
+        data,
+        length
+    );
+
+
+    framed.push_back(
+        '\n'
+    );
+
+
+    LOGE(
+        "emit_stdout: posting framed stdout length=%zu",
+        framed.size()
+    );
+
 
     post_dart_message(
         "stdout",
@@ -423,6 +427,19 @@ static void emit_stderr(
     const char* data,
     size_t length
 ) {
+    if (data == nullptr ||
+        length == 0) {
+
+        return;
+    }
+
+
+    LOGE(
+        "emit_stderr: Node stderr chunk length=%zu",
+        length
+    );
+
+
     post_dart_message(
         "stderr",
         data,
@@ -432,22 +449,19 @@ static void emit_stderr(
 
 
 // ===========================================================================
-// stdout reader
-// ===========================================================================
-//
-// stdout is line-framed here.
-//
-// This is intentional because the Node bridge protocol is NDJSON:
-//
-//     one JSON object per line
-//
-// Dart still keeps NdjsonLineSplitter so the transport contract remains
-// robust and equivalent to DesktopNcmBridge.
-//
+// stdout reader thread
 // ===========================================================================
 
-static void* stdout_reader_thread(void*) {
+static void* stdout_reader_thread(
+    void*
+) {
+    LOGE(
+        "stdout_reader_thread: START"
+    );
+
+
     char buffer[8192];
+
 
     std::string line_buffer;
 
@@ -457,6 +471,7 @@ static void* stdout_reader_thread(void*) {
 
 
     while (true) {
+
         const ssize_t n =
             read(
                 g_pipe_out[0],
@@ -466,24 +481,35 @@ static void* stdout_reader_thread(void*) {
 
 
         if (n == 0) {
-            // EOF.
+
+            LOGE(
+                "stdout_reader_thread: EOF"
+            );
+
             break;
         }
 
 
         if (n < 0) {
+
             if (errno == EINTR) {
                 continue;
             }
 
 
             LOGE(
-                "stdout read failed: %s",
+                "stdout_reader_thread: read FAILED: %s",
                 std::strerror(errno)
             );
 
             break;
         }
+
+
+        LOGE(
+            "stdout_reader_thread: read %zd bytes",
+            n
+        );
 
 
         line_buffer.append(
@@ -496,6 +522,7 @@ static void* stdout_reader_thread(void*) {
 
 
         while (true) {
+
             const size_t eol =
                 line_buffer.find(
                     '\n',
@@ -515,14 +542,25 @@ static void* stdout_reader_thread(void*) {
                 );
 
 
+            //
             // Remove CR from CRLF.
+            //
             if (!line.empty() &&
                 line.back() == '\r') {
+
                 line.pop_back();
             }
 
 
+            LOGE(
+                "stdout_reader_thread: complete line "
+                "length=%zu",
+                line.size()
+            );
+
+
             if (!line.empty()) {
+
                 emit_stdout(
                     line.data(),
                     line.size()
@@ -536,6 +574,7 @@ static void* stdout_reader_thread(void*) {
 
 
         if (start != 0) {
+
             line_buffer.erase(
                 0,
                 start
@@ -544,8 +583,18 @@ static void* stdout_reader_thread(void*) {
     }
 
 
+    //
     // Flush final unterminated line.
+    //
     if (!line_buffer.empty()) {
+
+        LOGE(
+            "stdout_reader_thread: flushing final line "
+            "length=%zu",
+            line_buffer.size()
+        );
+
+
         emit_stdout(
             line_buffer.data(),
             line_buffer.size()
@@ -553,26 +602,32 @@ static void* stdout_reader_thread(void*) {
     }
 
 
+    LOGE(
+        "stdout_reader_thread: END"
+    );
+
+
     return nullptr;
 }
 
 
 // ===========================================================================
-// stderr reader
-// ===========================================================================
-//
-// stderr is intentionally not line-framed.
-//
-// Node may write arbitrary chunks here and Dart simply exposes them as log
-// events.
-//
+// stderr reader thread
 // ===========================================================================
 
-static void* stderr_reader_thread(void*) {
+static void* stderr_reader_thread(
+    void*
+) {
+    LOGE(
+        "stderr_reader_thread: START"
+    );
+
+
     char buffer[8192];
 
 
     while (true) {
+
         const ssize_t n =
             read(
                 g_pipe_err[0],
@@ -582,18 +637,24 @@ static void* stderr_reader_thread(void*) {
 
 
         if (n == 0) {
+
+            LOGE(
+                "stderr_reader_thread: EOF"
+            );
+
             break;
         }
 
 
         if (n < 0) {
+
             if (errno == EINTR) {
                 continue;
             }
 
 
             LOGE(
-                "stderr read failed: %s",
+                "stderr_reader_thread: read FAILED: %s",
                 std::strerror(errno)
             );
 
@@ -601,11 +662,22 @@ static void* stderr_reader_thread(void*) {
         }
 
 
+        LOGE(
+            "stderr_reader_thread: read %zd bytes",
+            n
+        );
+
+
         emit_stderr(
             buffer,
             static_cast<size_t>(n)
         );
     }
+
+
+    LOGE(
+        "stderr_reader_thread: END"
+    );
 
 
     return nullptr;
@@ -618,6 +690,11 @@ static void* stderr_reader_thread(void*) {
 
 static int redirect_stdout_stderr() {
 
+    LOGE(
+        "redirect_stdout_stderr: START"
+    );
+
+
     setvbuf(
         stdout,
         nullptr,
@@ -626,14 +703,26 @@ static int redirect_stdout_stderr() {
     );
 
 
+    // -----------------------------------------------------------------------
+    // stdout pipe
+    // -----------------------------------------------------------------------
+
     if (pipe(g_pipe_out) != 0) {
+
         LOGE(
-            "pipe(stdout) failed: %s",
+            "pipe(stdout) FAILED: %s",
             std::strerror(errno)
         );
 
         return -1;
     }
+
+
+    LOGE(
+        "stdout pipe created: read=%d write=%d",
+        g_pipe_out[0],
+        g_pipe_out[1]
+    );
 
 
     if (dup2(
@@ -642,12 +731,17 @@ static int redirect_stdout_stderr() {
         ) < 0) {
 
         LOGE(
-            "dup2(stdout) failed: %s",
+            "dup2(stdout) FAILED: %s",
             std::strerror(errno)
         );
 
         return -1;
     }
+
+
+    LOGE(
+        "stdout redirected successfully"
+    );
 
 
     close(
@@ -656,6 +750,10 @@ static int redirect_stdout_stderr() {
 
     g_pipe_out[1] = -1;
 
+
+    // -----------------------------------------------------------------------
+    // stderr pipe
+    // -----------------------------------------------------------------------
 
     setvbuf(
         stderr,
@@ -666,13 +764,21 @@ static int redirect_stdout_stderr() {
 
 
     if (pipe(g_pipe_err) != 0) {
+
         LOGE(
-            "pipe(stderr) failed: %s",
+            "pipe(stderr) FAILED: %s",
             std::strerror(errno)
         );
 
         return -1;
     }
+
+
+    LOGE(
+        "stderr pipe created: read=%d write=%d",
+        g_pipe_err[0],
+        g_pipe_err[1]
+    );
 
 
     if (dup2(
@@ -681,12 +787,17 @@ static int redirect_stdout_stderr() {
         ) < 0) {
 
         LOGE(
-            "dup2(stderr) failed: %s",
+            "dup2(stderr) FAILED: %s",
             std::strerror(errno)
         );
 
         return -1;
     }
+
+
+    LOGE(
+        "stderr redirected successfully"
+    );
 
 
     close(
@@ -696,42 +807,80 @@ static int redirect_stdout_stderr() {
     g_pipe_err[1] = -1;
 
 
-    if (pthread_create(
+    // -----------------------------------------------------------------------
+    // stdout reader
+    // -----------------------------------------------------------------------
+
+    const int out_rc =
+        pthread_create(
             &g_thread_out,
             nullptr,
             stdout_reader_thread,
             nullptr
-        ) != 0) {
+        );
+
+
+    if (out_rc != 0) {
 
         LOGE(
-            "failed to create stdout reader"
+            "pthread_create(stdout reader) FAILED: "
+            "rc=%d (%s)",
+            out_rc,
+            std::strerror(out_rc)
         );
 
         return -1;
     }
 
 
-    if (pthread_create(
+    LOGE(
+        "stdout reader thread CREATED"
+    );
+
+
+    // -----------------------------------------------------------------------
+    // stderr reader
+    // -----------------------------------------------------------------------
+
+    const int err_rc =
+        pthread_create(
             &g_thread_err,
             nullptr,
             stderr_reader_thread,
             nullptr
-        ) != 0) {
+        );
+
+
+    if (err_rc != 0) {
 
         LOGE(
-            "failed to create stderr reader"
+            "pthread_create(stderr reader) FAILED: "
+            "rc=%d (%s)",
+            err_rc,
+            std::strerror(err_rc)
         );
 
         return -1;
     }
+
+
+    LOGE(
+        "stderr reader thread CREATED"
+    );
 
 
     pthread_detach(
         g_thread_out
     );
 
+
     pthread_detach(
         g_thread_err
+    );
+
+
+    LOGE(
+        "redirect_stdout_stderr: SUCCESS"
     );
 
 
@@ -745,14 +894,27 @@ static int redirect_stdout_stderr() {
 
 static int redirect_stdin() {
 
+    LOGE(
+        "redirect_stdin: START"
+    );
+
+
     if (pipe(g_pipe_in) != 0) {
+
         LOGE(
-            "pipe(stdin) failed: %s",
+            "pipe(stdin) FAILED: %s",
             std::strerror(errno)
         );
 
         return -1;
     }
+
+
+    LOGE(
+        "stdin pipe created: read=%d write=%d",
+        g_pipe_in[0],
+        g_pipe_in[1]
+    );
 
 
     if (dup2(
@@ -761,7 +923,7 @@ static int redirect_stdin() {
         ) < 0) {
 
         LOGE(
-            "dup2(stdin) failed: %s",
+            "dup2(stdin) FAILED: %s",
             std::strerror(errno)
         );
 
@@ -769,11 +931,21 @@ static int redirect_stdin() {
     }
 
 
+    LOGE(
+        "stdin redirected successfully"
+    );
+
+
     close(
         g_pipe_in[0]
     );
 
     g_pipe_in[0] = -1;
+
+
+    LOGE(
+        "redirect_stdin: SUCCESS"
+    );
 
 
     return 0;
@@ -795,9 +967,50 @@ struct StartArgs {
 // Node thread entry
 // ---------------------------------------------------------------------------
 
-static void* node_thread_main(void* arg) {
+static void* node_thread_main(
+    void* arg
+) {
+    LOGE(
+        "================================================"
+    );
+
+    LOGE(
+        "node_thread_main: ENTER"
+    );
+
+
     StartArgs* args =
-        static_cast<StartArgs*>(arg);
+        static_cast<StartArgs*>(
+            arg
+        );
+
+
+    if (args == nullptr) {
+
+        LOGE(
+            "node_thread_main: args == nullptr"
+        );
+
+        g_started = false;
+
+        return nullptr;
+    }
+
+
+    LOGE(
+        "node_thread_main: argc=%d",
+        args->argc
+    );
+
+
+    for (int i = 0; i < args->argc; ++i) {
+
+        LOGE(
+            "node_thread_main: argv[%d]=%s",
+            i,
+            args->argv[i].c_str()
+        );
+    }
 
 
     // -----------------------------------------------------------------------
@@ -807,10 +1020,18 @@ static void* node_thread_main(void* arg) {
     size_t total_size = 0;
 
 
-    for (const std::string& value : args->argv) {
+    for (const std::string& value :
+         args->argv) {
+
         total_size +=
             value.size() + 1;
     }
+
+
+    LOGE(
+        "node_thread_main: argv buffer size=%zu",
+        total_size
+    );
 
 
     char* buffer =
@@ -823,13 +1044,17 @@ static void* node_thread_main(void* arg) {
 
 
     if (buffer == nullptr) {
+
         LOGE(
-            "failed to allocate argv buffer"
+            "node_thread_main: failed to allocate argv buffer"
         );
+
 
         delete args;
 
+
         g_started = false;
+
 
         return nullptr;
     }
@@ -842,10 +1067,13 @@ static void* node_thread_main(void* arg) {
     );
 
 
-    char* cursor = buffer;
+    char* cursor =
+        buffer;
 
 
-    for (const std::string& value : args->argv) {
+    for (const std::string& value :
+         args->argv) {
+
         const size_t size =
             value.size();
 
@@ -867,55 +1095,116 @@ static void* node_thread_main(void* arg) {
     }
 
 
-    // -----------------------------------------------------------------------
-    // Redirect stdio BEFORE node::Start().
-    // -----------------------------------------------------------------------
-
-    if (redirect_stdout_stderr() != 0) {
-        LOGE(
-            "stdout/stderr redirection failed"
-        );
-
-        std::free(buffer);
-        delete args;
-
-        g_started = false;
-
-        return nullptr;
-    }
-
-
-    if (redirect_stdin() != 0) {
-        LOGE(
-            "stdin redirection failed"
-        );
-
-        std::free(buffer);
-        delete args;
-
-        g_started = false;
-
-        return nullptr;
-    }
-
-
-    LOGI(
-        "starting embedded node, argc=%d",
-        args->argc
+    LOGE(
+        "node_thread_main: argv buffer initialized"
     );
 
 
     // -----------------------------------------------------------------------
-    // Start Node.
+    // Redirect stdio BEFORE node::Start().
+    // -----------------------------------------------------------------------
+
+    LOGE(
+        "node_thread_main: redirecting stdout/stderr"
+    );
+
+
+    if (redirect_stdout_stderr() != 0) {
+
+        LOGE(
+            "node_thread_main: "
+            "stdout/stderr redirection FAILED"
+        );
+
+
+        std::free(buffer);
+
+        delete args;
+
+        g_started = false;
+
+        return nullptr;
+    }
+
+
+    LOGE(
+        "node_thread_main: stdout/stderr redirection OK"
+    );
+
+
+    LOGE(
+        "node_thread_main: redirecting stdin"
+    );
+
+
+    if (redirect_stdin() != 0) {
+
+        LOGE(
+            "node_thread_main: "
+            "stdin redirection FAILED"
+        );
+
+
+        std::free(buffer);
+
+        delete args;
+
+        g_started = false;
+
+        return nullptr;
+    }
+
+
+    LOGE(
+        "node_thread_main: stdin redirection OK"
+    );
+
+
+    // -----------------------------------------------------------------------
+    // IMPORTANT:
     //
-    // libnode.so exports:
-    //
-    //     _ZN4node5StartEiPPc
-    //
-    // which is:
-    //
-    //     node::Start(int, char**)
-    //
+    // After stdout/stderr redirection, use Android log only.
+    // -----------------------------------------------------------------------
+
+    LOGE(
+        "================================================"
+    );
+
+    LOGE(
+        "node_thread_main: ABOUT TO CALL node::Start()"
+    );
+
+
+    if (argv.empty()) {
+
+        LOGE(
+            "node_thread_main: argv is EMPTY"
+        );
+    } else {
+
+        LOGE(
+            "node_thread_main: argv[0]=%s",
+            argv[0]
+        );
+
+
+        if (argv.size() > 1) {
+
+            LOGE(
+                "node_thread_main: argv[1]=%s",
+                argv[1]
+            );
+        }
+    }
+
+
+    LOGE(
+        "node_thread_main: calling node::Start NOW"
+    );
+
+
+    // -----------------------------------------------------------------------
+    // Start embedded Node.
     // -----------------------------------------------------------------------
 
     const int rc =
@@ -925,9 +1214,14 @@ static void* node_thread_main(void* arg) {
         );
 
 
-    LOGI(
-        "node::Start returned %d",
+    LOGE(
+        "node_thread_main: node::Start() RETURNED rc=%d",
         rc
+    );
+
+
+    LOGE(
+        "node_thread_main: Node has exited"
     );
 
 
@@ -937,6 +1231,16 @@ static void* node_thread_main(void* arg) {
 
 
     g_started = false;
+
+
+    LOGE(
+        "node_thread_main: END"
+    );
+
+
+    LOGE(
+        "================================================"
+    );
 
 
     return nullptr;
@@ -950,14 +1254,21 @@ static void* node_thread_main(void* arg) {
 extern "C" {
 
 
-// ---------------------------------------------------------------------------
-// Dart API DL
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Dart API DL initialization
+// ===========================================================================
 
 intptr_t ncm_node_initialize_dart_api(
     void* data
 ) {
+    LOGE(
+        "ncm_node_initialize_dart_api: ENTER data=%p",
+        data
+    );
+
+
     if (data == nullptr) {
+
         LOGE(
             "ncm_node_initialize_dart_api: data is null"
         );
@@ -972,14 +1283,23 @@ intptr_t ncm_node_initialize_dart_api(
         );
 
 
-    if (result != 0) {
+    LOGE(
+        "ncm_node_initialize_dart_api: "
+        "Dart_InitializeApiDL result=%ld",
+        static_cast<long>(result)
+    );
+
+
+    if (result == 0) {
+
         LOGE(
-            "Dart_InitializeApiDL failed: %ld",
-            static_cast<long>(result)
+            "ncm_node_initialize_dart_api: SUCCESS"
         );
+
     } else {
-        LOGI(
-            "Dart API DL initialized"
+
+        LOGE(
+            "ncm_node_initialize_dart_api: FAILED"
         );
     }
 
@@ -988,34 +1308,56 @@ intptr_t ncm_node_initialize_dart_api(
 }
 
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Dart port
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 void ncm_node_set_dart_port(
     int64_t port
 ) {
+    LOGE(
+        "ncm_node_set_dart_port: ENTER port=%lld",
+        static_cast<long long>(port)
+    );
+
+
     g_dart_port.store(
         static_cast<Dart_Port_DL>(port),
         std::memory_order_release
     );
 
 
-    LOGI(
-        "Dart native port set: %lld",
-        static_cast<long long>(port)
+    const Dart_Port_DL stored =
+        g_dart_port.load(
+            std::memory_order_acquire
+        );
+
+
+    LOGE(
+        "ncm_node_set_dart_port: STORED port=%lld",
+        static_cast<long long>(stored)
     );
 }
 
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Start
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 int ncm_node_start(
     int argc,
     const char* const* argv
 ) {
+    LOGE(
+        "================================================"
+    );
+
+    LOGE(
+        "ncm_node_start: ENTER argc=%d",
+        argc
+    );
+
+
     if (argc <= 0 ||
         argv == nullptr) {
 
@@ -1027,9 +1369,19 @@ int ncm_node_start(
     }
 
 
-    if (g_dart_port.load(
+    const Dart_Port_DL port =
+        g_dart_port.load(
             std::memory_order_acquire
-        ) == ILLEGAL_PORT) {
+        );
+
+
+    LOGE(
+        "ncm_node_start: Dart port=%lld",
+        static_cast<long long>(port)
+    );
+
+
+    if (port == ILLEGAL_PORT) {
 
         LOGE(
             "ncm_node_start: Dart port is not initialized"
@@ -1040,8 +1392,9 @@ int ncm_node_start(
 
 
     if (g_started.exchange(true)) {
-        LOGW(
-            "ncm_node_start: node is already running"
+
+        LOGE(
+            "ncm_node_start: Node is already running"
         );
 
         return -1;
@@ -1052,7 +1405,8 @@ int ncm_node_start(
         new StartArgs();
 
 
-    args->argc = argc;
+    args->argc =
+        argc;
 
 
     args->argv.reserve(
@@ -1063,10 +1417,12 @@ int ncm_node_start(
     for (int i = 0; i < argc; ++i) {
 
         if (argv[i] == nullptr) {
+
             LOGE(
                 "ncm_node_start: argv[%d] is null",
                 i
             );
+
 
             delete args;
 
@@ -1082,7 +1438,27 @@ int ncm_node_start(
     }
 
 
+    LOGE(
+        "ncm_node_start: arguments copied successfully"
+    );
+
+
+    for (int i = 0; i < argc; ++i) {
+
+        LOGE(
+            "ncm_node_start: copied argv[%d]=%s",
+            i,
+            args->argv[i].c_str()
+        );
+    }
+
+
     pthread_t thread;
+
+
+    LOGE(
+        "ncm_node_start: creating Node pthread"
+    );
 
 
     const int rc =
@@ -1095,10 +1471,14 @@ int ncm_node_start(
 
 
     if (rc != 0) {
+
         LOGE(
-            "pthread_create failed: %s",
+            "ncm_node_start: pthread_create FAILED "
+            "rc=%d (%s)",
+            rc,
             std::strerror(rc)
         );
+
 
         delete args;
 
@@ -1108,8 +1488,23 @@ int ncm_node_start(
     }
 
 
+    LOGE(
+        "ncm_node_start: Node pthread CREATED"
+    );
+
+
     pthread_detach(
         thread
+    );
+
+
+    LOGE(
+        "ncm_node_start: RETURN 0"
+    );
+
+
+    LOGE(
+        "================================================"
     );
 
 
@@ -1117,24 +1512,37 @@ int ncm_node_start(
 }
 
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // stdin
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 int ncm_node_write_stdin(
     const unsigned char* data,
     size_t length
 ) {
+    LOGE(
+        "ncm_node_write_stdin: ENTER length=%zu",
+        length
+    );
+
+
     if (data == nullptr &&
         length != 0) {
+
+        LOGE(
+            "ncm_node_write_stdin: invalid data pointer"
+        );
 
         return -1;
     }
 
 
     if (g_pipe_in[1] < 0) {
+
         LOGE(
-            "stdin pipe is not initialized"
+            "ncm_node_write_stdin: stdin pipe "
+            "is not initialized fd=%d",
+            g_pipe_in[1]
         );
 
         return -1;
@@ -1155,13 +1563,14 @@ int ncm_node_write_stdin(
 
 
         if (n < 0) {
+
             if (errno == EINTR) {
                 continue;
             }
 
 
             LOGE(
-                "write(stdin) failed: %s",
+                "ncm_node_write_stdin: write FAILED: %s",
                 std::strerror(errno)
             );
 
@@ -1170,8 +1579,9 @@ int ncm_node_write_stdin(
 
 
         if (n == 0) {
+
             LOGE(
-                "write(stdin) returned zero"
+                "ncm_node_write_stdin: write returned zero"
             );
 
             return -1;
@@ -1183,21 +1593,34 @@ int ncm_node_write_stdin(
     }
 
 
+    LOGE(
+        "ncm_node_write_stdin: SUCCESS wrote=%zu",
+        offset
+    );
+
+
     return 0;
 }
 
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Shutdown
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 void ncm_node_request_shutdown() {
+
+    LOGE(
+        "ncm_node_request_shutdown: ENTER"
+    );
+
+
     //
     // Node's current embedded startup does not expose a reliable clean
     // shutdown API.
     //
     // Keep this as a no-op for now.
     //
+
     LOGW(
         "shutdown requested, but embedded Node "
         "has no clean shutdown API"
@@ -1205,16 +1628,28 @@ void ncm_node_request_shutdown() {
 }
 
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Running state
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 int ncm_node_is_running() {
-    return g_started.load(
-        std::memory_order_acquire
-    )
-        ? 1
-        : 0;
+
+    const int running =
+        g_started.load(
+            std::memory_order_acquire
+        )
+            ? 1
+            : 0;
+
+
+    LOGE(
+        "ncm_node_is_running: %d",
+        running
+    );
+
+
+    return running;
 }
+
 
 } // extern "C"
