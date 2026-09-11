@@ -39,6 +39,10 @@ flutter:
   assets:
     - assets/bridge/bridge.js
     - assets/bridge/dist/
+    - assets/bridge/dist/data/
+    - assets/bridge/dist/module/
+    - assets/bridge/dist/util
+    - assets/bridge/dist/server.js
   plugin:
     platforms:
 
