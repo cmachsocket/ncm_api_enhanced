@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'bridge.dart';
@@ -107,45 +108,73 @@ class MobileNcmBridge implements NcmBridge {
   Stream<Map<String, dynamic>> get events => _stream.stream;
 
   // ==========================================================================
+  // Logging
+  // ==========================================================================
+
+  void _log(String message) {
+    debugPrint('[NcmBridge] $message');
+  }
+
+  String _shorten(Object? value, [int maxLength = 1000]) {
+    final text = value.toString();
+
+    if (text.length <= maxLength) {
+      return text;
+    }
+
+    return '${text.substring(0, maxLength)}...';
+  }
+
+  // ==========================================================================
   // Native library
   // ==========================================================================
 
   void _loadNative() {
-    //
-    // libncm_node_bridge.so is the code asset produced by CBuilder.
-    //
-    // libnode.so is a DT_NEEDED dependency of that library and therefore
-    // does not need to be opened manually.
-    //
+    _log('loadNative: ENTER');
 
     _library = DynamicLibrary.open('libncm_node_bridge.so');
+
+    _log('loadNative: library opened');
 
     _initializeDartApi = _library
         .lookupFunction<_InitializeDartApiNative, _InitializeDartApiDart>(
           'ncm_node_initialize_dart_api',
         );
 
+    _log('loadNative: ncm_node_initialize_dart_api loaded');
+
     _setDartPort = _library
         .lookupFunction<_SetDartPortNative, _SetDartPortDart>(
           'ncm_node_set_dart_port',
         );
 
+    _log('loadNative: ncm_node_set_dart_port loaded');
+
     _startNode = _library.lookupFunction<_StartNative, _StartDart>(
       'ncm_node_start',
     );
 
+    _log('loadNative: ncm_node_start loaded');
+
     _writeStdin = _library.lookupFunction<_WriteStdinNative, _WriteStdinDart>(
       'ncm_node_write_stdin',
     );
+
+    _log('loadNative: ncm_node_write_stdin loaded');
 
     _requestShutdown = _library
         .lookupFunction<_RequestShutdownNative, _RequestShutdownDart>(
           'ncm_node_request_shutdown',
         );
 
+    _log('loadNative: ncm_node_request_shutdown loaded');
+
     _isRunning = _library.lookupFunction<_IsRunningNative, _IsRunningDart>(
       'ncm_node_is_running',
     );
+
+    _log('loadNative: ncm_node_is_running loaded');
+    _log('loadNative: SUCCESS');
   }
 
   // ==========================================================================
@@ -154,20 +183,15 @@ class MobileNcmBridge implements NcmBridge {
 
   void _initializeNativePort() {
     if (_nativeApiInitialized) {
+      _log('initializeNativePort: already initialized');
       return;
     }
 
-    //
-    // Initialize Dart API DL.
-    //
-    // This gives the native library access to:
-    //
-    //     Dart_PostCObject_DL()
-    //
-    // from native threads.
-    //
+    _log('initializeNativePort: ENTER');
 
     final result = _initializeDartApi(NativeApi.initializeApiDLData);
+
+    _log('initializeNativePort: Dart_InitializeApiDL result=$result');
 
     if (result != 0) {
       throw BridgeError(
@@ -178,26 +202,39 @@ class MobileNcmBridge implements NcmBridge {
 
     _nativeApiInitialized = true;
 
-    //
-    // Create a ReceivePort belonging to the current Dart isolate.
-    //
+    _log('initializeNativePort: Dart API DL initialized');
 
     final port = ReceivePort();
 
     _nativePort = port;
 
+    _log(
+      'initializeNativePort: ReceivePort created '
+      'nativePort=${port.sendPort.nativePort}',
+    );
+
     _nativePortSubscription = port.listen(
       _handleNativeMessage,
       onError: (Object error, StackTrace stack) {
+        _log(
+          'initializeNativePort: ReceivePort ERROR '
+          'error=$error',
+        );
+
         _handleFatal(BridgeError('native message port error', error, stack));
       },
     );
 
-    //
-    // Give native code the SendPort's native port ID.
-    //
+    _log('initializeNativePort: listener installed');
 
-    _setDartPort(port.sendPort.nativePort);
+    final nativePort = port.sendPort.nativePort;
+
+    _setDartPort(nativePort);
+
+    _log(
+      'initializeNativePort: native port sent '
+      'port=$nativePort',
+    );
   }
 
   // ==========================================================================
@@ -205,8 +242,16 @@ class MobileNcmBridge implements NcmBridge {
   // ==========================================================================
 
   void _handleNativeMessage(dynamic message) {
+    _log(
+      'NativePort RECEIVE '
+      'type=${message.runtimeType} '
+      'value=${_shorten(message)}',
+    );
+
     try {
       if (message is! List || message.length != 2) {
+        _log('NativePort INVALID message');
+
         _handleFatal(BridgeError('invalid native message: $message'));
 
         return;
@@ -216,7 +261,16 @@ class MobileNcmBridge implements NcmBridge {
 
       final data = message[1];
 
+      _log(
+        'NativePort decoded '
+        'type=$type '
+        'dataType=${data.runtimeType} '
+        'dataLength=${data is String ? data.length : -1}',
+      );
+
       if (type is! String || data is! String) {
+        _log('NativePort INVALID payload');
+
         _handleFatal(BridgeError('invalid native message payload: $message'));
 
         return;
@@ -226,14 +280,29 @@ class MobileNcmBridge implements NcmBridge {
 
       switch (nativeMessage.type) {
         case 'stdout':
+          _log(
+            'NativePort -> stdout '
+            'length=${nativeMessage.data.length}',
+          );
+
           _handleStdout(nativeMessage.data);
           break;
 
         case 'stderr':
+          _log(
+            'NativePort -> stderr '
+            'length=${nativeMessage.data.length}',
+          );
+
           _handleStderr(nativeMessage.data);
           break;
 
         default:
+          _log(
+            'NativePort UNKNOWN TYPE '
+            'type=${nativeMessage.type}',
+          );
+
           _handleFatal(
             BridgeError(
               'unknown native message type '
@@ -242,6 +311,11 @@ class MobileNcmBridge implements NcmBridge {
           );
       }
     } catch (e, st) {
+      _log(
+        'NativePort HANDLER EXCEPTION '
+        'error=$e',
+      );
+
       _handleFatal(BridgeError('failed to process native message', e, st));
     }
   }
@@ -251,20 +325,35 @@ class MobileNcmBridge implements NcmBridge {
   // ==========================================================================
 
   void _handleStdout(String chunk) {
-    try {
-      //
-      // Native currently emits complete stdout lines.
-      //
-      // Keep NdjsonLineSplitter here anyway so the protocol remains the same
-      // as DesktopNcmBridge and does not depend on native framing forever.
-      //
+    _log(
+      'STDOUT CHUNK '
+      'length=${chunk.length} '
+      'data=${_shorten(chunk)}',
+    );
 
+    try {
       final events = _splitter.feed(chunk);
 
+      _log(
+        'STDOUT splitter produced '
+        '${events.length} event(s)',
+      );
+
       for (final event in events) {
+        _log(
+          'STDOUT NDJSON EVENT '
+          'value=${_shorten(event.value)} '
+          'error=${event.error}',
+        );
+
         _dispatch(event);
       }
     } catch (e, st) {
+      _log(
+        'STDOUT PROCESS ERROR '
+        'error=$e',
+      );
+
       _handleFatal(BridgeError('failed to process native stdout', e, st));
     }
   }
@@ -274,7 +363,14 @@ class MobileNcmBridge implements NcmBridge {
   // ==========================================================================
 
   void _handleStderr(String message) {
+    _log(
+      'STDERR '
+      'length=${message.length} '
+      'message=${_shorten(message)}',
+    );
+
     if (_stream.isClosed) {
+      _log('STDERR ignored: event stream already closed');
       return;
     }
 
@@ -290,11 +386,21 @@ class MobileNcmBridge implements NcmBridge {
 
   @override
   Future<void> start() async {
+    _log(
+      'START ENTER '
+      'started=$_started '
+      'shutdown=$_shutdown',
+    );
+
     if (_shutdown) {
+      _log('START REJECTED: already shutdown');
+
       throw StateError('MobileNcmBridge: bridge has already been shut down');
     }
 
     if (_started) {
+      _log('START: already started, waiting for existing ready');
+
       final ready = _readyCompleter;
 
       if (ready == null) {
@@ -304,6 +410,8 @@ class MobileNcmBridge implements NcmBridge {
       return ready.future.timeout(
         const Duration(seconds: 30),
         onTimeout: () {
+          _log('START: existing ready TIMEOUT');
+
           throw BridgeError('native bridge did not become ready within 30s');
         },
       );
@@ -313,23 +421,18 @@ class MobileNcmBridge implements NcmBridge {
 
     _readyCompleter = Completer<void>();
 
+    _log('START: state initialized');
+
     try {
-      //
-      // This MUST happen before ncm_node_start().
-      //
-      // Native Node runs on its own pthread and will use
-      // Dart_PostCObject_DL() from that thread.
-      //
+      _log('START: initializing NativePort');
 
       _initializeNativePort();
 
-      //
-      // This must be a real filesystem directory because bundle.js does:
-      //
-      //     require.resolve("./xhr-sync-worker.js")
-      //
+      _log('START: NativePort initialized');
 
       final bridgeRoot = await _resolveBridgeRoot();
+
+      _log('START: bridgeRoot=$bridgeRoot');
 
       final bundleJs = File(
         '${bridgeRoot}${Platform.pathSeparator}'
@@ -337,20 +440,23 @@ class MobileNcmBridge implements NcmBridge {
         'bundle.js',
       );
 
+      _log('START: bundleJs=${bundleJs.path}');
+
       if (!await bundleJs.exists()) {
+        _log('START ERROR: bundle.js does not exist');
+
         throw BridgeError(
           'MobileNcmBridge: bundle.js not found at '
           '${bundleJs.path}',
         );
       }
 
-      //
-      // Direct Node entry:
-      //
-      //     node bundle.js
-      //
-
       final arguments = <String>['node', bundleJs.path];
+
+      _log(
+        'START: Node arguments='
+        '${_shorten(arguments)}',
+      );
 
       final argv = calloc<Pointer<Utf8>>(arguments.length);
 
@@ -363,9 +469,18 @@ class MobileNcmBridge implements NcmBridge {
           allocated.add(ptr);
 
           argv[i] = ptr;
+
+          _log('START: argv[$i]=${arguments[i]}');
         }
 
+        _log('START: calling ncm_node_start');
+
         final result = _startNode(arguments.length, argv);
+
+        _log(
+          'START: ncm_node_start returned '
+          'code=$result',
+        );
 
         if (result != 0) {
           throw BridgeError(
@@ -379,8 +494,15 @@ class MobileNcmBridge implements NcmBridge {
         }
 
         calloc.free(argv);
+
+        _log('START: argv memory freed');
       }
     } catch (e, st) {
+      _log(
+        'START ERROR '
+        'error=$e',
+      );
+
       _started = false;
 
       if (_readyCompleter != null && !_readyCompleter!.isCompleted) {
@@ -392,17 +514,13 @@ class MobileNcmBridge implements NcmBridge {
       rethrow;
     }
 
-    //
-    // ncm_node_start() only means the native Node thread was created.
-    //
-    // Actual readiness comes from:
-    //
-    //     {"event":"ready","data":...}
-    //
+    _log('START: waiting for protocol ready event');
 
     return _readyCompleter!.future.timeout(
       const Duration(seconds: 30),
       onTimeout: () {
+        _log('START: READY TIMEOUT');
+
         throw BridgeError('native bridge did not become ready within 30s');
       },
     );
@@ -416,9 +534,16 @@ class MobileNcmBridge implements NcmBridge {
     const explicitRoot = String.fromEnvironment('NCM_BRIDGE_ROOT');
 
     if (explicitRoot.isNotEmpty) {
+      _log(
+        'resolveBridgeRoot: using explicit root '
+        '$explicitRoot',
+      );
+
       final directory = Directory(explicitRoot);
 
       if (!await directory.exists()) {
+        _log('resolveBridgeRoot: explicit root DOES NOT EXIST');
+
         throw BridgeError(
           'NCM_BRIDGE_ROOT does not exist: '
           '$explicitRoot',
@@ -428,16 +553,13 @@ class MobileNcmBridge implements NcmBridge {
       return directory.path;
     }
 
-    //
-    // bundle.js and xhr-sync-worker.js are Flutter assets.
-    //
-    // Node cannot execute a Flutter AssetBundle URI directly, so copy them
-    // into a real filesystem tree.
-    //
+    _log('resolveBridgeRoot: extracting Flutter assets');
 
     final root = await Directory.systemTemp.createTemp(
       'ncm_api_enhanced_bridge_',
     );
+
+    _log('resolveBridgeRoot: root=$root');
 
     final dist = Directory('${root.path}${Platform.pathSeparator}dist');
 
@@ -465,10 +587,18 @@ class MobileNcmBridge implements NcmBridge {
       ),
     );
 
+    _log('resolveBridgeRoot: extraction COMPLETE');
+
     return root.path;
   }
 
   Future<void> _extractAsset(String asset, File destination) async {
+    _log(
+      'extractAsset: START '
+      'asset=$asset '
+      'destination=${destination.path}',
+    );
+
     try {
       final data = await rootBundle.load(asset);
 
@@ -477,8 +607,25 @@ class MobileNcmBridge implements NcmBridge {
         data.lengthInBytes,
       );
 
+      _log(
+        'extractAsset: loaded '
+        'asset=$asset '
+        'bytes=${bytes.length}',
+      );
+
       await destination.writeAsBytes(bytes, flush: true);
+
+      _log(
+        'extractAsset: SUCCESS '
+        'asset=$asset',
+      );
     } catch (e, st) {
+      _log(
+        'extractAsset: ERROR '
+        'asset=$asset '
+        'error=$e',
+      );
+
       throw BridgeError(
         'failed to extract Flutter asset '
         '"$asset"',
@@ -493,11 +640,24 @@ class MobileNcmBridge implements NcmBridge {
   // ==========================================================================
 
   void _dispatch(NdjsonEvent event) {
+    _log(
+      'DISPATCH ENTER '
+      'value=${_shorten(event.value)} '
+      'error=${event.error} '
+      'pending=${_pending.size()}',
+    );
+
     dispatchNdjson(
       events: [event],
       pending: _pending,
       eventsCtl: _stream,
       onFatal: (message, cause) {
+        _log(
+          'DISPATCH FATAL '
+          'message=$message '
+          'cause=$cause',
+        );
+
         _handleFatal(BridgeError('node fatal: $message', cause));
       },
     );
@@ -508,11 +668,32 @@ class MobileNcmBridge implements NcmBridge {
         value['event'] == 'ready' &&
         _readyCompleter != null &&
         !_readyCompleter!.isCompleted) {
+      _log('DISPATCH: READY EVENT');
+
       _readyCompleter!.complete();
+
+      _log('DISPATCH: READY COMPLETER COMPLETED');
     }
+
+    if (value != null && value.containsKey('id')) {
+      _log(
+        'DISPATCH: RESPONSE '
+        'id=${value['id']} '
+        'ok=${value['ok']} '
+        'pending=${_pending.size()}',
+      );
+    }
+
+    _log('DISPATCH EXIT');
   }
 
   void _handleFatal(Object error) {
+    _log(
+      'FATAL '
+      'error=$error '
+      'pending=${_pending.size()}',
+    );
+
     _pending.rejectAll(error);
 
     if (_readyCompleter != null && !_readyCompleter!.isCompleted) {
@@ -529,17 +710,45 @@ class MobileNcmBridge implements NcmBridge {
     String method, [
     Map<String, dynamic>? params,
   ]) async {
+    _log(
+      'CALL ENTER '
+      'method=$method '
+      'params=${_shorten(params)}',
+    );
+
     final ready = _readyCompleter;
 
     if (ready == null || !ready.isCompleted) {
+      _log(
+        'CALL REJECTED: bridge not ready '
+        'method=$method',
+      );
+
       throw StateError('MobileNcmBridge: call() before ready');
     }
 
     if (_shutdown) {
+      _log(
+        'CALL REJECTED: bridge shutdown '
+        'method=$method',
+      );
+
       throw StateError('MobileNcmBridge: call() after shutdown');
     }
 
-    if (_isRunning() == 0) {
+    final running = _isRunning();
+
+    _log(
+      'CALL: native running=$running '
+      'method=$method',
+    );
+
+    if (running == 0) {
+      _log(
+        'CALL REJECTED: Node not running '
+        'method=$method',
+      );
+
       throw BridgeError('native Node process is not running');
     }
 
@@ -549,6 +758,13 @@ class MobileNcmBridge implements NcmBridge {
 
     final completer = entry.completer;
 
+    _log(
+      'CALL CREATED '
+      'id=$id '
+      'method=$method '
+      'pending=${_pending.size()}',
+    );
+
     final payload = jsonEncode({
       'id': id,
       'method': method,
@@ -557,12 +773,34 @@ class MobileNcmBridge implements NcmBridge {
 
     final bytes = utf8.encode('$payload\n');
 
+    _log(
+      'CALL REQUEST '
+      'id=$id '
+      'method=$method '
+      'bytes=${bytes.length} '
+      'payload=${_shorten(payload)}',
+    );
+
     final buffer = calloc<Uint8>(bytes.length);
 
     try {
       buffer.asTypedList(bytes.length).setAll(0, bytes);
 
+      _log(
+        'CALL WRITE STDIN '
+        'id=$id '
+        'method=$method '
+        'bytes=${bytes.length}',
+      );
+
       final result = _writeStdin(buffer, bytes.length);
+
+      _log(
+        'CALL WRITE STDIN RESULT '
+        'id=$id '
+        'method=$method '
+        'code=$result',
+      );
 
       if (result != 0) {
         _pending.take(id);
@@ -571,6 +809,13 @@ class MobileNcmBridge implements NcmBridge {
           'native stdin write failed for '
           '"$method" '
           '(id=$id, code=$result)',
+        );
+
+        _log(
+          'CALL WRITE ERROR '
+          'id=$id '
+          'method=$method '
+          'error=$error',
         );
 
         if (!completer.isCompleted) {
@@ -584,6 +829,13 @@ class MobileNcmBridge implements NcmBridge {
 
       final error = BridgeError('native call failed', e, st);
 
+      _log(
+        'CALL EXCEPTION '
+        'id=$id '
+        'method=$method '
+        'error=$error',
+      );
+
       if (!completer.isCompleted) {
         completer.completeError(error);
       }
@@ -591,20 +843,55 @@ class MobileNcmBridge implements NcmBridge {
       return completer.future;
     } finally {
       calloc.free(buffer);
+
+      _log(
+        'CALL: stdin buffer freed '
+        'id=$id '
+        'method=$method',
+      );
     }
 
-    return completer.future.timeout(
-      _callTimeout,
-      onTimeout: () {
-        _pending.take(id);
+    try {
+      final result = await completer.future.timeout(
+        _callTimeout,
+        onTimeout: () {
+          _log(
+            'CALL TIMEOUT '
+            'id=$id '
+            'method=$method '
+            'pending=${_pending.size()}',
+          );
 
-        throw TimeoutException(
-          'NCM call "$method" (id=$id) exceeded '
-          '${_callTimeout.inSeconds}s',
-          _callTimeout,
-        );
-      },
-    );
+          _pending.take(id);
+
+          throw TimeoutException(
+            'NCM call "$method" (id=$id) exceeded '
+            '${_callTimeout.inSeconds}s',
+            _callTimeout,
+          );
+        },
+      );
+
+      _log(
+        'CALL COMPLETE '
+        'id=$id '
+        'method=$method '
+        'result=${_shorten(result)} '
+        'pending=${_pending.size()}',
+      );
+
+      return result;
+    } catch (e) {
+      _log(
+        'CALL ERROR '
+        'id=$id '
+        'method=$method '
+        'error=$e '
+        'pending=${_pending.size()}',
+      );
+
+      rethrow;
+    }
   }
 
   // ==========================================================================
@@ -613,31 +900,57 @@ class MobileNcmBridge implements NcmBridge {
 
   @override
   Future<void> shutdown() async {
+    _log(
+      'SHUTDOWN ENTER '
+      'started=$_started '
+      'shutdown=$_shutdown '
+      'pending=${_pending.size()}',
+    );
+
     if (_shutdown) {
+      _log('SHUTDOWN: already shutdown');
       return;
     }
 
     _shutdown = true;
 
     try {
+      _log('SHUTDOWN: calling native request shutdown');
+
       _requestShutdown();
-    } catch (_) {
-      // Native side may already be gone.
+
+      _log('SHUTDOWN: native request returned');
+    } catch (e) {
+      _log(
+        'SHUTDOWN: native request failed '
+        'error=$e',
+      );
     }
 
     try {
-      for (final event in _splitter.flush()) {
+      final events = _splitter.flush();
+
+      _log(
+        'SHUTDOWN: splitter.flush '
+        'events=${events.length}',
+      );
+
+      for (final event in events) {
         _dispatch(event);
       }
-    } catch (_) {
-      // Ignore malformed trailing data during shutdown.
+    } catch (e) {
+      _log(
+        'SHUTDOWN: splitter flush failed '
+        'error=$e',
+      );
     }
 
-    _pending.rejectAll(BridgeError('bridge shut down'));
+    _log(
+      'SHUTDOWN: rejecting pending '
+      'count=${_pending.size()}',
+    );
 
-    //
-    // Stop accepting native messages before closing the Dart port.
-    //
+    _pending.rejectAll(BridgeError('bridge shut down'));
 
     await _nativePortSubscription?.cancel();
 
@@ -651,12 +964,8 @@ class MobileNcmBridge implements NcmBridge {
       await _stream.close();
     }
 
-    //
-    // Native shutdown is currently a no-op and Node may technically still
-    // be running. Therefore do NOT unload the native library or invalidate
-    // the Dart API DL state here.
-    //
-
     _started = false;
+
+    _log('SHUTDOWN EXIT');
   }
 }
