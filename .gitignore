@@ -21,6 +21,3 @@ packages/ncm_api_enhanced/build/
 # OS junk
 .DS_Store
 Thumbs.db
-
-# Node
-node_modules/
