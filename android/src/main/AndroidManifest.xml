@@ -1,5 +1,0 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.example.ncm_api_enhanced">
-    <!-- Required by upstream NCM axios calls to music.163.com. -->
-    <uses-permission android:name="android.permission.INTERNET" />
-</manifest>

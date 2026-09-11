@@ -1,233 +1,319 @@
-// hook/build.dart — downloads libnode.so for Android via the build hook
-// protocol.
-//
-// We declare one CodeAsset per Android ABI (DynamicLoadingBundled). The
-// Dart/Flutter SDK copies the libnode.so we point at into the app's
-// lib/<abi>/. Our CMake build (android/src/main/cpp/CMakeLists.txt)
-// links against the same file path so libncm_node_bridge.so can resolve
-// node::Start at app launch.
-//
-// We also copy the same .so file into android/src/main/jniLibs/<abi>/
-// so the Android Gradle Plugin packages it into the AAR — without
-// this step, the app would only have libnode.so inside its own lib/
-// directory but the plugin's CMake build couldn't find it for linking.
-//
-// Other OSes: this hook is a no-op on iOS (NodeMobile.xcframework is
-// a directory of binaries, which CodeAsset can't express), and on
-// desktop (the system `node` binary is used instead).
-
-// Hooks run once at build time. We deliberately use `print` to surface
-// progress to the developer and don't follow strict style rules.
-// ignore_for_file: avoid_print, unnecessary_brace_in_string_interps
-
 import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
-import 'package:http/http.dart' as http;
+import 'package:native_toolchain_c/native_toolchain_c.dart';
 
-// Pinned nodejs-mobile release. Update in lockstep with README.md and
-// CHANGELOG.md — bumping this is a breaking change for the package.
-const String _releaseTag = 'v18.20.4';
-const String _assetBase = 'https://github.com/nodejs-mobile/nodejs-mobile/releases/download/$_releaseTag';
-// GitHub release assets ship as .zip (not .tar.gz).
-const String _androidArchive = '$_assetBase/nodejs-mobile-$_releaseTag-android.zip';
+const _nodeVersion = '18.20.4';
 
-// Test-only aliases so `flutter test` can verify the pinned values
-// without re-typing them in test code.
-const String releaseTagForTesting = _releaseTag;
-const String androidArchiveUrlForTesting = _androidArchive;
+const _nodeAndroidZipUrl =
+    'https://github.com/nodejs-mobile/nodejs-mobile/releases/download/'
+    'v18.20.4/nodejs-mobile-v18.20.4-android.zip';
 
-// sha256 of nodejs-mobile-v18.20.4-android.tar.gz. Pinned so a
-// malicious mirror / re-release can't slip a different libnode into
-// apps. Update via a coordinated package release when upstream bumps.
-//
-// sha256 verification is a TODO before publishing; for now we rely on
-// hook cache invalidation. See _download().
-// const String _androidTarballSha256 = '...';
+const _bridgeAssetName = 'native/node_bridge.dart';
 
-// ABI → libnode filename as packaged in the tarball. Keys are the
-// canonical Architecture names (which are stable strings per
-// code_assets 2.x), not Architecture instances, because const maps
-// require primitive keys.
-const Map<String, String> _androidLibNodeByArchName = {
-  'arm': 'libnode.so',
-  'arm64': 'libnode.so',
-  'x64': 'libnode.so',
-};
-
-void main(List<String> args) async {
+Future<void> main(List<String> args) async {
   await build(args, (input, output) async {
+    final config = input.config.code;
+
+    // -----------------------------------------------------------------------
+    // This package's native bridge is Android-only.
+    // -----------------------------------------------------------------------
+
+    if (config.targetOS != OS.android) {
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Native assets can be disabled by the build configuration.
+    // -----------------------------------------------------------------------
+
     if (!input.config.buildCodeAssets) {
       return;
     }
-    final code = input.config.code;
-    switch (code.targetOS) {
-      case OS.android:
-        await _buildAndroid(input, output);
-      case OS.iOS:
-      case OS.linux:
-      case OS.macOS:
-      case OS.windows:
-      case OS.fuchsia:
-        // iOS: NodeMobile.xcframework is a directory — CodeAsset can't
-        // express that. The user adds the framework to the Xcode
-        // project manually (see docs/mobile_setup.md and
-        // tool/patch_ios_pbxproj.rb).
-        //
-        // Desktop: we spawn the system `node` binary; no native asset
-        // needs to ship.
-        //
-        // Fuchsia: not supported.
-        break;
+
+    final architecture = config.targetArchitecture;
+
+    final abi = _androidAbi(architecture);
+
+    if (abi == null) {
+      throw UnsupportedError(
+        'ncm_api_enhanced: unsupported Android architecture: '
+        '${architecture.name}',
+      );
     }
+
+    print(
+      'ncm_api_enhanced: building Node.js Mobile $_nodeVersion '
+      'for Android $abi',
+    );
+
+    // -----------------------------------------------------------------------
+    // Shared output directory.
+    //
+    // Build hooks are expected to place generated/downloaded artifacts here.
+    // -----------------------------------------------------------------------
+
+    final sharedDir = Directory.fromUri(input.outputDirectoryShared);
+
+    await sharedDir.create(recursive: true);
+
+    // -----------------------------------------------------------------------
+    // Download + extract libnode.so.
+    // -----------------------------------------------------------------------
+
+    final nodeDir = Directory(
+      '${sharedDir.path}/nodejs-mobile-$_nodeVersion/$abi',
+    );
+
+    await nodeDir.create(recursive: true);
+
+    final nodeLibrary = File('${nodeDir.path}/libnode.so');
+
+    if (!await nodeLibrary.exists()) {
+      await _downloadNodeLibrary(
+        outputDirectory: sharedDir,
+        destination: nodeLibrary,
+        abi: abi,
+      );
+    }
+
+    if (!await nodeLibrary.exists()) {
+      throw StateError(
+        'ncm_api_enhanced: failed to obtain libnode.so for $abi',
+      );
+    }
+
+    print('ncm_api_enhanced: libnode.so: ${nodeLibrary.path}');
+
+    // -----------------------------------------------------------------------
+    // Make sure node_bridge.cpp exists.
+    // -----------------------------------------------------------------------
+
+    final bridgeSource = File.fromUri(
+      input.packageRoot.resolve('native/android/node_bridge.cpp'),
+    );
+
+    if (!await bridgeSource.exists()) {
+      throw StateError(
+        'ncm_api_enhanced: missing native/android/node_bridge.cpp',
+      );
+    }
+
+    // -----------------------------------------------------------------------
+    // CBuilder
+    //
+    // node_bridge.cpp contains:
+    //
+    //     namespace node {
+    //       int Start(int argc, char** argv);
+    //     }
+    //
+    // so no node.h is required.
+    //
+    // The linker resolves:
+    //
+    //     _ZN4node5StartEiPPc
+    //
+    // from libnode.so.
+    // -----------------------------------------------------------------------
+
+    final builder = CBuilder.library(
+      name: 'ncm_node_bridge',
+      assetName: _bridgeAssetName,
+
+      sources: <String>[bridgeSource.path],
+
+      libraries: <String>['node', 'log'],
+
+      libraryDirectories: <String>[nodeDir.path],
+
+      language: Language.cpp,
+
+      // node_bridge.cpp uses C++.
+      cppLinkStdLib: 'c++_shared',
+
+      // Build as a dynamic library.
+      linkModePreference: LinkModePreference.dynamic,
+
+      // Position-independent shared library.
+      pic: true,
+
+      // C++17 is more than enough for this bridge.
+      std: 'c++17',
+
+      optimizationLevel: OptimizationLevel.o3,
+    );
+
+    await builder.run(input: input, output: output);
+
+    // -----------------------------------------------------------------------
+    // Register libnode.so itself.
+    //
+    // CBuilder registers libncm_node_bridge.so.
+    //
+    // libnode.so is a separate prebuilt dynamic library and must also be
+    // exposed to the application bundle.
+    // -----------------------------------------------------------------------
+
+    output.assets.code.add(
+      CodeAsset(
+        package: input.packageName,
+        name: 'native/libnode.dart',
+        linkMode: DynamicLoadingBundled(),
+        file: nodeLibrary.uri,
+      ),
+    );
+
+    print('ncm_api_enhanced: registered libnode.so for $abi');
   });
 }
 
-Future<void> _buildAndroid(
-    HookInput input, BuildOutputBuilder output) async {
-  final code = input.config.code;
-  final archName = code.targetArchitecture.name;
-  // nodejs-mobile v18.20.4 ships armeabi-v7a + arm64-v8a + x86_64.
-  if (!_androidLibNodeByArchName.containsKey(archName)) {
-    throw UnsupportedError(
-      'ncm_api_enhanced: no libnode.so for Android architecture $archName',
-    );
-  }
+// ===========================================================================
+// Android ABI
+// ===========================================================================
 
-  final cacheDir = Directory.fromUri(input.outputDirectoryShared);
-  await cacheDir.create(recursive: true);
-
-  final archive = File.fromUri(
-    cacheDir.uri.resolve('nodejs-mobile-$_releaseTag-android.zip'),
-  );
-  await _download(archive, _androidArchive);
-
-  // Extract just the libnode.so for this ABI. The zip layout is:
-  //   bin/<abi>/libnode.so
-  //   include/node/*.h
-  final abiDir = _abiDirFor(archName);
-  final entryPath = 'bin/$abiDir/libnode.so';
-  final libnodeOut = File.fromUri(cacheDir.uri.resolve('libnode-$abiDir.so'));
-
-  await _extractFromZip(archive, entryPath, libnodeOut);
-
-  // Validate size / magic. libnode.so is a real ELF / Mach-O file with a
-  // non-trivial size (~30 MB). Catching corruption here surfaces a clear
-  // error during `flutter build` rather than at app launch.
-  final bytes = await libnodeOut.readAsBytes();
-  if (bytes.length < 1024 * 1024) {
-    throw StateError(
-      'Extracted libnode.so is suspiciously small (${bytes.length} bytes); '
-      'archive may be corrupt.',
-    );
-  }
-
-  // Also copy into android/src/main/jniLibs/<abi>/ so CMake's IMPORTED
-  // location can find it at link time, and so the AGP packages it into
-  // the AAR's jniLibs directory.
-  final pluginJniLibs = Directory(
-    '${input.packageRoot.toFilePath()}android/src/main/jniLibs/$abiDir',
-  );
-  if (!pluginJniLibs.existsSync()) {
-    pluginJniLibs.createSync(recursive: true);
-  }
-  await libnodeOut.copy('${pluginJniLibs.path}/libnode.so');
-
-  // Declare the code asset. `DynamicLoadingBundled` is the only mode
-  // CodeAsset uses to ship files into the app bundle for Dart/Flutter.
-  output.assets.code.add(
-    CodeAsset(
-      package: input.packageName,
-      name: 'src/native/libnode_${abiDir}.dart',
-      linkMode: DynamicLoadingBundled(),
-      file: libnodeOut.uri,
-    ),
-  );
-
-  // Hook cache invalidation: rerun when the archive on disk changes.
-  output.dependencies.add(archive.uri);
-}
-
-String _abiDirFor(String archName) {
-  switch (archName) {
-    case 'arm':
-      return 'armeabi-v7a';
-    case 'arm64':
+String? _androidAbi(Architecture architecture) {
+  switch (architecture) {
+    case Architecture.arm64:
       return 'arm64-v8a';
-    case 'x64':
+
+    case Architecture.arm:
+      return 'armeabi-v7a';
+
+    case Architecture.x64:
       return 'x86_64';
+
     default:
-      throw UnsupportedError('Unsupported arch: $archName');
+      return null;
   }
 }
 
-/// Test-only alias for [_abiDirFor]. Kept as a separate name so the
-/// public API surface stays clean.
-String abiDirForTesting(String archName) => _abiDirFor(archName);
+// ===========================================================================
+// Download + extract libnode.so
+// ===========================================================================
 
-Future<void> _download(File dest, String url) async {
-  if (await dest.exists()) {
-    return; // hook caching: .dart_tool/hooks_runner/<pkg>/<hash>/ survives across runs.
+Future<void> _downloadNodeLibrary({
+  required Directory outputDirectory,
+  required File destination,
+  required String abi,
+}) async {
+  final archiveDir = Directory(
+    '${outputDirectory.path}/nodejs-mobile-$_nodeVersion',
+  );
+
+  await archiveDir.create(recursive: true);
+
+  final zipFile = File(
+    '${archiveDir.path}/'
+    'nodejs-mobile-v$_nodeVersion-android.zip',
+  );
+
+  // -------------------------------------------------------------------------
+  // Download ZIP if necessary.
+  // -------------------------------------------------------------------------
+
+  if (!await zipFile.exists()) {
+    print('ncm_api_enhanced: downloading $_nodeAndroidZipUrl');
+
+    await _downloadFile(Uri.parse(_nodeAndroidZipUrl), zipFile);
   }
 
-  // The Dart SDK gives us a per-config temp dir; we can't share it across
-  // hook invocations. For repeated CI builds (and for `flutter test` of
-  // our own hook), this means re-downloading ~70 MB every time. Cache
-  // the archive under a stable global path so second-and-later runs
-  // are instant.
-  final globalCache = await _globalCacheDir();
-  final cachedArchive = File('${globalCache.path}/${url.split('/').last}');
-  if (await cachedArchive.exists()) {
-    await cachedArchive.copy(dest.path);
-    return;
+  // -------------------------------------------------------------------------
+  // Read ZIP.
+  // -------------------------------------------------------------------------
+
+  print('ncm_api_enhanced: extracting $abi/libnode.so');
+
+  final bytes = await zipFile.readAsBytes();
+
+  final archive = ZipDecoder().decodeBytes(bytes, verify: true);
+
+  // Official nodejs-mobile Android release layout:
+  //
+  //   bin/
+  //     arm64-v8a/
+  //       libnode.so
+  //     armeabi-v7a/
+  //       libnode.so
+  //     x86_64/
+  //       libnode.so
+  //
+  // See nodejs-mobile Android samples.
+  // -------------------------------------------------------------------------
+
+  final expectedPath = 'bin/$abi/libnode.so';
+
+  ArchiveFile? nodeFile;
+
+  for (final file in archive.files) {
+    final normalized = file.name.replaceAll('\\', '/');
+
+    if (normalized == expectedPath) {
+      nodeFile = file;
+      break;
+    }
   }
-  print('Downloading $url');
-  final response = await http.get(Uri.parse(url));
-  if (response.statusCode != 200) {
-    throw HttpException(
-      'Failed to download $url: status ${response.statusCode}',
+
+  if (nodeFile == null) {
+    throw StateError(
+      'ncm_api_enhanced: $expectedPath was not found in '
+      '$_nodeAndroidZipUrl',
     );
   }
-  await cachedArchive.parent.create(recursive: true);
-  await cachedArchive.writeAsBytes(response.bodyBytes);
-  await cachedArchive.copy(dest.path);
-  // sha256 verification is a TODO before publishing; for now we rely on
-  // hook cache invalidation + the HTTPS-only GitHub Releases endpoint.
-  // When added, verify against the pin comment at the top of this file.
+
+  final content = nodeFile.content;
+
+  await destination.parent.create(recursive: true);
+
+  await destination.writeAsBytes(content, flush: true);
+
+  print('ncm_api_enhanced: extracted ${destination.path}');
 }
 
-/// User-level cache directory for downloaded archives. Survives across
-/// builds and across `flutter test` runs. The cache lives under the
-/// platform-specific user cache path (e.g. `~/.cache/ncm_api_enhanced`
-/// on Linux/macOS, `%LOCALAPPDATA%\ncm_api_enhanced` on Windows).
-Future<Directory> _globalCacheDir() async {
-  final env = Platform.environment;
-  final base = env['NCM_BRIDGE_CACHE_DIR'] ??
-      env['XDG_CACHE_HOME'] ??
-      (Platform.isWindows
-          ? env['LOCALAPPDATA'] ?? '.'
-          : env['HOME'] != null ? '${env['HOME']}/.cache' : '.');
-  return Directory('$base/ncm_api_enhanced');
-}
+// ===========================================================================
+// HTTP download
+// ===========================================================================
 
-Future<void> _extractFromZip(
-    File archive, String entryName, File outFile) async {
-  if (await outFile.exists()) return;
-  final bytes = await archive.readAsBytes();
-  final zip = ZipDecoder().decodeBytes(bytes);
-  final entry = zip.files.firstWhere(
-    (f) => f.name == entryName,
-    orElse: () => throw StateError(
-      'Entry "$entryName" not found in ${archive.path}.\n'
-      'Available top-level entries:\n'
-      '${zip.files.map((f) => "  ${f.name}").take(20).join("\n")}',
-    ),
-  );
-  if (!entry.isFile) {
-    throw StateError('Archive entry "$entryName" is not a file');
+Future<void> _downloadFile(Uri url, File destination) async {
+  final temp = File('${destination.path}.download');
+
+  if (await temp.exists()) {
+    await temp.delete();
   }
-  await outFile.create(recursive: true);
-  await outFile.writeAsBytes(entry.content as List<int>);
+
+  final client = HttpClient();
+
+  try {
+    client.userAgent =
+        'ncm_api_enhanced/$_nodeVersion '
+        '(Dart build hook)';
+
+    final request = await client.getUrl(url);
+
+    request.followRedirects = true;
+    request.maxRedirects = 8;
+
+    final response = await request.close();
+
+    if (response.statusCode != HttpStatus.ok) {
+      await response.drain();
+
+      throw HttpException('HTTP ${response.statusCode} while downloading $url');
+    }
+
+    final sink = temp.openWrite();
+
+    try {
+      await response.pipe(sink);
+    } catch (_) {
+      await sink.close();
+      rethrow;
+    }
+
+    await temp.rename(destination.path);
+  } finally {
+    client.close(force: true);
+  }
 }
