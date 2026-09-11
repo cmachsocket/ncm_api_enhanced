@@ -400,10 +400,17 @@ static void emit_stdout(
     const char* data,
     size_t length
 ) {
+    if (data == nullptr || length == 0) {
+        return;
+    }
+
+    std::string framed(data, length);
+    framed.push_back('\n');
+
     post_dart_message(
         "stdout",
-        data,
-        length
+        framed.data(),
+        framed.size()
     );
 }
 
