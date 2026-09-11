@@ -28,7 +28,7 @@
 //
 //   NcmApi()
 //
-// requires neither `bridgeRoot` nor `NCM_BRIDGE_ROOT`.
+// requires neither `bridgeRoot` nor `NCM_BRIDGE_ROOT.
 
 import 'dart:async';
 import 'dart:convert';
@@ -103,9 +103,9 @@ class DesktopNcmBridge implements NcmBridge {
   @override
   Stream<Map<String, dynamic>> get events => _events.stream;
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Bridge root resolution
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   Future<String> _resolveBridgeRoot() async {
     // 1. Explicit constructor argument.
@@ -143,15 +143,20 @@ class DesktopNcmBridge implements NcmBridge {
     );
   }
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Asset extraction
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
-  /// Extract the complete bridge tree from Flutter's asset bundle.
+  /// Extract the bridge files from Flutter's asset bundle.
   ///
-  /// Returns null only when bundle.js is not present.
+  /// The resulting temporary directory contains:
   ///
-  /// Throws [BridgeError] when the asset exists but extraction or validation
+  ///   bundle.js
+  ///   xhr-sync-worker.js
+  ///
+  /// Returns null only when bundle.js is not present in the asset manifest.
+  ///
+  /// Throws [BridgeError] when bundle.js exists but extraction or validation
   /// fails.
   Future<Directory?> _extractBridgeFromAssets() async {
     final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
@@ -242,7 +247,7 @@ class DesktopNcmBridge implements NcmBridge {
 
   /// Validate the extracted bridge tree.
   ///
-  /// bundle.js contains:
+  /// `bundle.js` contains:
   ///
   ///   require.resolve("./xhr-sync-worker.js")
   ///
@@ -276,9 +281,9 @@ class DesktopNcmBridge implements NcmBridge {
     }
   }
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Lifecycle
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   @override
   Future<void> start() async {
@@ -319,6 +324,13 @@ class DesktopNcmBridge implements NcmBridge {
         );
       }
 
+      // -----------------------------------------------------------------------
+      // Start Node.
+      //
+      // bundle.js is self-contained and contains the Netease API implementation.
+      // No package.json / node_modules tree is required here.
+      // -----------------------------------------------------------------------
+
       _proc = await Process.start(
         nodeExecutable,
         <String>[bridgeJs.path],
@@ -328,9 +340,9 @@ class DesktopNcmBridge implements NcmBridge {
 
       final proc = _proc!;
 
-      // ---------------------------------------------------------------------
+      // -----------------------------------------------------------------------
       // stdout
-      // ---------------------------------------------------------------------
+      // -----------------------------------------------------------------------
 
       proc.stdout
           .transform(utf8.decoder)
@@ -349,30 +361,50 @@ class DesktopNcmBridge implements NcmBridge {
             onDone: _handleStdoutDone,
           );
 
-      // ---------------------------------------------------------------------
+      // -----------------------------------------------------------------------
       // stderr
-      // ---------------------------------------------------------------------
+      // -----------------------------------------------------------------------
 
-      proc.stderr.transform(utf8.decoder).listen((String text) {
-        if (_events.isClosed) {
-          return;
-        }
+      proc.stderr
+          .transform(utf8.decoder)
+          .listen(
+            (String text) {
+              if (_events.isClosed) {
+                return;
+              }
 
-        _events.add({
-          'event': 'log',
-          'data': {'level': 'stderr', 'line': text},
-        });
-      }, onError: (_) {});
+              _events.add({
+                'event': 'log',
+                'data': {'level': 'stderr', 'line': text},
+              });
+            },
+            onError: (Object error, StackTrace stackTrace) {
+              if (_events.isClosed) {
+                return;
+              }
 
-      // ---------------------------------------------------------------------
+              _events.add({
+                'event': 'log',
+                'data': {'level': 'stderr_error', 'error': error.toString()},
+              });
+            },
+          );
+
+      // -----------------------------------------------------------------------
       // Process exit
-      // ---------------------------------------------------------------------
+      // -----------------------------------------------------------------------
 
       proc.exitCode.then(_onNodeExit);
 
-      // ---------------------------------------------------------------------
+      // -----------------------------------------------------------------------
       // Wait for bundle.js readiness.
-      // ---------------------------------------------------------------------
+      //
+      // bundle.js emits:
+      //
+      //   {"event":"ready","data":{"pid":...,"node":"..."}}
+      //
+      // `_dispatch()` completes `_readyCompleter` when this frame arrives.
+      // -----------------------------------------------------------------------
 
       await _readyCompleter!.future.timeout(
         const Duration(seconds: 30),
@@ -387,6 +419,10 @@ class DesktopNcmBridge implements NcmBridge {
       rethrow;
     }
   }
+
+  // ===========================================================================
+  // NDJSON stdout handling
+  // ===========================================================================
 
   void _handleStdout(String chunk) {
     if (_events.isClosed) {
@@ -442,6 +478,10 @@ class DesktopNcmBridge implements NcmBridge {
     }
   }
 
+  // ===========================================================================
+  // Node exit handling
+  // ===========================================================================
+
   void _onNodeExit(int code) {
     if (_nodeExitHandled) {
       return;
@@ -469,6 +509,10 @@ class DesktopNcmBridge implements NcmBridge {
     _proc = null;
     _started = false;
   }
+
+  // ===========================================================================
+  // Failed startup cleanup
+  // ===========================================================================
 
   Future<void> _abortStart() async {
     _started = false;
@@ -498,9 +542,9 @@ class DesktopNcmBridge implements NcmBridge {
     }
   }
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // RPC
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   @override
   Future<Map<String, dynamic>> call(
@@ -509,7 +553,7 @@ class DesktopNcmBridge implements NcmBridge {
   ]) async {
     final proc = _proc;
 
-    if (proc == null) {
+    if (proc == null || !_started) {
       throw StateError('DesktopNcmBridge: call() before start()');
     }
 
@@ -550,9 +594,9 @@ class DesktopNcmBridge implements NcmBridge {
     );
   }
 
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
   // Shutdown
-  // ---------------------------------------------------------------------------
+  // ===========================================================================
 
   @override
   Future<void> shutdown() async {
@@ -564,6 +608,10 @@ class DesktopNcmBridge implements NcmBridge {
 
     if (proc != null) {
       try {
+        // Closing stdin sends EOF to the Node bridge.
+        //
+        // The bundle uses process.stdin as its request stream, so this gives
+        // Node a chance to terminate cleanly.
         await proc.stdin.close();
       } catch (_) {}
 
