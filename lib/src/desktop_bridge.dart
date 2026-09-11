@@ -448,7 +448,7 @@ class DesktopNcmBridge implements NcmBridge {
     //
     // Keep this as a fallback because stdout may close before the process
     // exit future is observed.
-    _onNodeExit(0);
+    //_onNodeExit(0);
   }
 
   void _dispatch(NdjsonEvent event) {
