@@ -27,6 +27,7 @@ dependencies:
   hooks: ^2.2.0
   http: ^1.5.0
   native_toolchain_c: ^0.19.4
+  ffi:
 
 dev_dependencies:
   flutter_test:
