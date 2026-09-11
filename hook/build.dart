@@ -19,10 +19,8 @@ Future<void> main(List<String> args) async {
       return;
     }
 
-    // 现在才能访问 code。
     final config = input.config.code;
 
-    // 只给 Android 构建。
     if (config.targetOS != OS.android) {
       return;
     }
@@ -31,7 +29,9 @@ Future<void> main(List<String> args) async {
     final abi = _androidAbi(architecture);
 
     if (abi == null) {
-      throw UnsupportedError('Unsupported Android architecture: $architecture');
+      throw UnsupportedError(
+        'Unsupported Android architecture: $architecture',
+      );
     }
 
     print(
@@ -43,37 +43,50 @@ Future<void> main(List<String> args) async {
     // Shared output directory.
     // -----------------------------------------------------------------------
 
-    final sharedDir = Directory.fromUri(input.outputDirectoryShared);
+    final sharedDir = Directory.fromUri(
+      input.outputDirectoryShared,
+    );
 
-    await sharedDir.create(recursive: true);
+    await sharedDir.create(
+      recursive: true,
+    );
 
     // -----------------------------------------------------------------------
     // Locate Dart SDK.
     //
-    // Platform.resolvedExecutable:
-    //
     //   <dart-sdk>/bin/dart
+    //          ^
+    //          |
+    //   Platform.resolvedExecutable
     //
     // Therefore:
     //
     //   parent        -> <dart-sdk>/bin
     //   parent.parent -> <dart-sdk>
     //
-    // Dart API DL files:
+    // Dart API DL:
     //
     //   <dart-sdk>/include/dart_api_dl.h
     //   <dart-sdk>/include/dart_api_dl.c
     // -----------------------------------------------------------------------
 
-    final dartExecutable = File(Platform.resolvedExecutable);
+    final dartExecutable = File(
+      Platform.resolvedExecutable,
+    );
 
     final dartSdkDir = dartExecutable.parent.parent;
 
-    final dartIncludeDir = Directory('${dartSdkDir.path}/include');
+    final dartIncludeDir = Directory(
+      '${dartSdkDir.path}/include',
+    );
 
-    final dartApiDlHeader = File('${dartIncludeDir.path}/dart_api_dl.h');
+    final dartApiDlHeader = File(
+      '${dartIncludeDir.path}/dart_api_dl.h',
+    );
 
-    final dartApiDlSource = File('${dartIncludeDir.path}/dart_api_dl.c');
+    final dartApiDlSource = File(
+      '${dartIncludeDir.path}/dart_api_dl.c',
+    );
 
     if (!await dartApiDlHeader.exists()) {
       throw StateError(
@@ -104,28 +117,49 @@ Future<void> main(List<String> args) async {
       '${dartApiDlSource.path}',
     );
 
+    output.dependencies.add(
+      dartApiDlHeader.uri,
+    );
+
+    output.dependencies.add(
+      dartApiDlSource.uri,
+    );
+
     // -----------------------------------------------------------------------
-    // Build dependencies.
+    // Prepare dart_api_dl.c for the C++ CBuilder.
     //
-    // dart_api_dl.h is included by node_bridge.cpp.
+    // native_toolchain_c's CBuilder is configured as Language.cpp, and
+    // RunCBuilder passes:
     //
-    // dart_api_dl.c is compiled directly into libncm_node_bridge.so and
-    // provides the actual Dart_*_DL symbols, including:
+    //     -x c++
     //
-    //     Dart_PostCObject_DL
+    // for ALL source files.
     //
-    // This is IMPORTANT.
+    // Therefore passing the original dart_api_dl.c directly causes the
+    // official C source to be compiled as C++, which fails on Dart 3.10's
+    // DartApiEntry_function conversion.
     //
-    // Without dart_api_dl.c, the resulting ELF contains:
-    //
-    //     UND Dart_PostCObject_DL
-    //
-    // and Android's linker fails during dlopen().
+    // We create a private build copy and make the one C -> C++ conversion
+    // required by clang.
     // -----------------------------------------------------------------------
 
-    output.dependencies.add(dartApiDlHeader.uri);
+    final dartApiDlCpp = File(
+      '${sharedDir.path}/dart_api_dl_compat.cpp',
+    );
 
-    output.dependencies.add(dartApiDlSource.uri);
+    await _prepareDartApiDlCpp(
+      source: dartApiDlSource,
+      destination: dartApiDlCpp,
+    );
+
+    output.dependencies.add(
+      dartApiDlCpp.uri,
+    );
+
+    print(
+      'ncm_api_enhanced: prepared Dart API DL C++ source: '
+      '${dartApiDlCpp.path}',
+    );
 
     // -----------------------------------------------------------------------
     // Download + extract libnode.so.
@@ -135,9 +169,13 @@ Future<void> main(List<String> args) async {
       '${sharedDir.path}/nodejs-mobile-$_nodeVersion/$abi',
     );
 
-    await nodeDir.create(recursive: true);
+    await nodeDir.create(
+      recursive: true,
+    );
 
-    final nodeLibrary = File('${nodeDir.path}/libnode.so');
+    final nodeLibrary = File(
+      '${nodeDir.path}/libnode.so',
+    );
 
     if (!await nodeLibrary.exists()) {
       await _downloadNodeLibrary(
@@ -159,11 +197,13 @@ Future<void> main(List<String> args) async {
     );
 
     // -----------------------------------------------------------------------
-    // Make sure node_bridge.cpp exists.
+    // node_bridge.cpp
     // -----------------------------------------------------------------------
 
     final bridgeSource = File.fromUri(
-      input.packageRoot.resolve('native/android/node_bridge.cpp'),
+      input.packageRoot.resolve(
+        'native/android/node_bridge.cpp',
+      ),
     );
 
     if (!await bridgeSource.exists()) {
@@ -175,25 +215,25 @@ Future<void> main(List<String> args) async {
 
     // -----------------------------------------------------------------------
     // CBuilder
-    // -----------------------------------------------------------------------
     //
-    // Two sources are compiled into the SAME shared library:
+    // The resulting shared library contains:
     //
     //     node_bridge.cpp
-    //     dart_api_dl.c
+    //     dart_api_dl_compat.cpp
     //
-    // node_bridge.cpp:
+    // and links:
     //
-    //     #include <dart_api_dl.h>
+    //     libnode.so
+    //     liblog.so
     //
-    // and uses:
+    // dart_api_dl_compat.cpp provides:
     //
-    //     Dart_InitializeApiDL()
-    //     Dart_PostCObject_DL()
+    //     Dart_InitializeApiDL
+    //     Dart_PostCObject_DL
+    //     ...
     //
-    // dart_api_dl.c provides the actual Dart API DL storage and
-    // initialization implementation.
-    //
+    // so libncm_node_bridge.so no longer leaves
+    // Dart_PostCObject_DL as an unresolved ELF symbol.
     // -----------------------------------------------------------------------
 
     final builder = CBuilder.library(
@@ -202,53 +242,43 @@ Future<void> main(List<String> args) async {
 
       sources: <String>[
         bridgeSource.path,
-
-        // IMPORTANT:
-        //
-        // This defines Dart_PostCObject_DL and the rest of the
-        // Dart API DL function-pointer table.
-        dartApiDlSource.path,
+        dartApiDlCpp.path,
       ],
 
-      // dart_api_dl.h:
-      //
-      //   <dart-sdk>/include/dart_api_dl.h
-      //
-      // native_toolchain_c does not automatically add this directory.
-      includes: <String>[dartIncludeDir.path],
+      // dart_api_dl.h lives here.
+      includes: <String>[
+        dartIncludeDir.path,
+      ],
 
-      libraries: <String>['node', 'log'],
+      libraries: <String>[
+        'node',
+        'log',
+      ],
 
-      libraryDirectories: <String>[nodeDir.path],
+      libraryDirectories: <String>[
+        nodeDir.path,
+      ],
 
       language: Language.cpp,
 
-      // node_bridge.cpp uses C++.
       cppLinkStdLib: 'c++_shared',
 
-      // Build as a dynamic library.
       linkModePreference: LinkModePreference.dynamic,
 
-      // Position-independent code.
       pic: true,
 
-      // C++17 is sufficient for the bridge.
       std: 'c++17',
 
       optimizationLevel: OptimizationLevel.o3,
     );
 
-    await builder.run(input: input, output: output);
+    await builder.run(
+      input: input,
+      output: output,
+    );
 
     // -----------------------------------------------------------------------
-    // Register libnode.so itself.
-    //
-    // CBuilder produces:
-    //
-    //     libncm_node_bridge.so
-    //
-    // libnode.so is a separate prebuilt dynamic library and must also be
-    // exposed to the application bundle.
+    // Register libnode.so.
     // -----------------------------------------------------------------------
 
     output.assets.code.add(
@@ -260,15 +290,72 @@ Future<void> main(List<String> args) async {
       ),
     );
 
-    print('ncm_api_enhanced: registered libnode.so for $abi');
+    print(
+      'ncm_api_enhanced: registered libnode.so for $abi',
+    );
   });
+}
+
+// ===========================================================================
+// Prepare Dart API DL C++ compatibility source
+// ===========================================================================
+
+Future<void> _prepareDartApiDlCpp({
+  required File source,
+  required File destination,
+}) async {
+  var content = await source.readAsString();
+
+  // Dart SDK's dart_api_dl.c contains a C-compatible conversion:
+  //
+  //     return entries->function;
+  //
+  // When the file is compiled as C++, the type is:
+  //
+  //     DartApiEntry_function == void*
+  //
+  // while entries->function is a function pointer.
+  //
+  // C accepts this conversion, but C++ does not.
+  //
+  // Explicitly cast it to the API's declared return type.
+  const original =
+      'if (strcmp(entries->name, name) == 0) return entries->function;';
+
+  const replacement =
+      'if (strcmp(entries->name, name) == 0) '
+      'return reinterpret_cast<DartApiEntry_function>('
+      'entries->function);';
+
+  if (!content.contains(original)) {
+    throw StateError(
+      'ncm_api_enhanced: unexpected dart_api_dl.c layout. '
+      'Could not find the expected DartApiEntry lookup expression.',
+    );
+  }
+
+  content = content.replaceFirst(
+    original,
+    replacement,
+  );
+
+  await destination.parent.create(
+    recursive: true,
+  );
+
+  await destination.writeAsString(
+    content,
+    flush: true,
+  );
 }
 
 // ===========================================================================
 // Android ABI
 // ===========================================================================
 
-String? _androidAbi(Architecture architecture) {
+String? _androidAbi(
+  Architecture architecture,
+) {
   switch (architecture) {
     case Architecture.arm64:
       return 'arm64-v8a';
@@ -297,7 +384,9 @@ Future<void> _downloadNodeLibrary({
     '${outputDirectory.path}/nodejs-mobile-$_nodeVersion',
   );
 
-  await archiveDir.create(recursive: true);
+  await archiveDir.create(
+    recursive: true,
+  );
 
   final zipFile = File(
     '${archiveDir.path}/'
@@ -314,7 +403,10 @@ Future<void> _downloadNodeLibrary({
       '$_nodeAndroidReleaseUrl',
     );
 
-    await _downloadFile(Uri.parse(_nodeAndroidReleaseUrl), zipFile);
+    await _downloadFile(
+      Uri.parse(_nodeAndroidReleaseUrl),
+      zipFile,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -328,25 +420,20 @@ Future<void> _downloadNodeLibrary({
 
   final bytes = await zipFile.readAsBytes();
 
-  final archive = ZipDecoder().decodeBytes(bytes, verify: true);
-
-  // Official nodejs-mobile Android release layout:
-  //
-  //   bin/
-  //     arm64-v8a/
-  //       libnode.so
-  //     armeabi-v7a/
-  //       libnode.so
-  //     x86_64/
-  //       libnode.so
-  //
+  final archive = ZipDecoder().decodeBytes(
+    bytes,
+    verify: true,
+  );
 
   final expectedPath = 'bin/$abi/libnode.so';
 
   ArchiveFile? nodeFile;
 
   for (final file in archive.files) {
-    final normalized = file.name.replaceAll('\\', '/');
+    final normalized = file.name.replaceAll(
+      '\\',
+      '/',
+    );
 
     if (normalized == expectedPath) {
       nodeFile = file;
@@ -363,9 +450,14 @@ Future<void> _downloadNodeLibrary({
 
   final content = nodeFile.content;
 
-  await destination.parent.create(recursive: true);
+  await destination.parent.create(
+    recursive: true,
+  );
 
-  await destination.writeAsBytes(content, flush: true);
+  await destination.writeAsBytes(
+    content,
+    flush: true,
+  );
 
   print(
     'ncm_api_enhanced: extracted '
@@ -377,8 +469,13 @@ Future<void> _downloadNodeLibrary({
 // HTTP download
 // ===========================================================================
 
-Future<void> _downloadFile(Uri url, File destination) async {
-  final temp = File('${destination.path}.download');
+Future<void> _downloadFile(
+  Uri url,
+  File destination,
+) async {
+  final temp = File(
+    '${destination.path}.download',
+  );
 
   if (await temp.exists()) {
     await temp.delete();
@@ -401,7 +498,9 @@ Future<void> _downloadFile(Uri url, File destination) async {
     if (response.statusCode != HttpStatus.ok) {
       await response.drain();
 
-      throw HttpException('HTTP ${response.statusCode} while downloading $url');
+      throw HttpException(
+        'HTTP ${response.statusCode} while downloading $url',
+      );
     }
 
     final sink = temp.openWrite();
@@ -413,8 +512,12 @@ Future<void> _downloadFile(Uri url, File destination) async {
       rethrow;
     }
 
-    await temp.rename(destination.path);
+    await temp.rename(
+      destination.path,
+    );
   } finally {
-    client.close(force: true);
+    client.close(
+      force: true,
+    );
   }
 }
