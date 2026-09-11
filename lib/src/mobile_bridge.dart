@@ -32,10 +32,10 @@ class MobileNcmBridge implements NcmBridge {
     MethodChannel? methodChannel,
     EventChannel? eventChannel,
     Duration callTimeout = kDefaultCallTimeout,
-  })  : _method = methodChannel ?? const MethodChannel(channelName),
-        _events = eventChannel ?? const EventChannel(eventChannelName),
-        // ignore: prefer_initializing_formals
-        _callTimeout = callTimeout;
+  }) : _method = methodChannel ?? const MethodChannel(channelName),
+       _events = eventChannel ?? const EventChannel(eventChannelName),
+       // ignore: prefer_initializing_formals
+       _callTimeout = callTimeout;
 
   static const String channelName = 'ncm_api_enhanced/bridge';
   static const String eventChannelName = 'ncm_api_enhanced/events';
@@ -70,14 +70,18 @@ class MobileNcmBridge implements NcmBridge {
         }
       },
       onError: (e, st) {
-        _readyCompleter?.completeError(BridgeError('event channel error', e, st));
+        _readyCompleter?.completeError(
+          BridgeError('event channel error', e, st),
+        );
         _pending.rejectAll(BridgeError('event channel closed', e, st));
       },
       onDone: () {
         for (final ev in _splitter.flush()) {
           _dispatch(ev);
         }
-        _readyCompleter?.completeError(BridgeError('event channel closed before ready'));
+        _readyCompleter?.completeError(
+          BridgeError('event channel closed before ready'),
+        );
         _pending.rejectAll(BridgeError('event channel closed'));
       },
     );
@@ -88,7 +92,9 @@ class MobileNcmBridge implements NcmBridge {
       });
       final ready = result != null && result['ready'] == true;
       if (!ready) {
-        throw BridgeError('native bridge start did not return ready=true: $result');
+        throw BridgeError(
+          'native bridge start did not return ready=true: $result',
+        );
       }
     } catch (e, st) {
       _readyCompleter?.completeError(BridgeError('start() failed', e, st));
@@ -117,7 +123,10 @@ class MobileNcmBridge implements NcmBridge {
 
     // If we just got the first "ready" event, mark the bridge as ready.
     final m = ev.value;
-    if (m != null && m['event'] == 'ready' && _readyCompleter != null && !_readyCompleter!.isCompleted) {
+    if (m != null &&
+        m['event'] == 'ready' &&
+        _readyCompleter != null &&
+        !_readyCompleter!.isCompleted) {
       _readyCompleter!.complete();
     }
   }
@@ -149,13 +158,16 @@ class MobileNcmBridge implements NcmBridge {
       return completer.future;
     }
 
-    return completer.future.timeout(_callTimeout, onTimeout: () {
-      _pending.take(id);
-      throw TimeoutException(
-        'NCM call "$method" (id=$id) exceeded ${_callTimeout.inSeconds}s',
-        _callTimeout,
-      );
-    });
+    return completer.future.timeout(
+      _callTimeout,
+      onTimeout: () {
+        _pending.take(id);
+        throw TimeoutException(
+          'NCM call "$method" (id=$id) exceeded ${_callTimeout.inSeconds}s',
+          _callTimeout,
+        );
+      },
+    );
   }
 
   @override

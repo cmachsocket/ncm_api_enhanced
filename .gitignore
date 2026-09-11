@@ -15,6 +15,7 @@ packages/ncm_api_enhanced/android/src/main/jniLibs/*/libnode.so
 .pub/
 /.idea/
 *.iml
+node_modules/
 
 # OS junk
 .DS_Store
