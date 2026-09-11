@@ -477,7 +477,7 @@ class MobileNcmBridge implements NcmBridge {
           completer.completeError(error);
         }
 
-        return completer.future;
+        return await completer.future;
       }
     } catch (e, st) {
       _pending.take(id);

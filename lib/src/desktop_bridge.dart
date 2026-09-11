@@ -1,8 +1,9 @@
 // Desktop bridge implementation.
 //
 // Linux/macOS/Windows:
+//
 //   - Uses the system `node` executable.
-//   - Communicates with bridge.js through NDJSON over stdin/stdout.
+//   - Communicates with bundle.js through NDJSON over stdin/stdout.
 //
 // Bridge root resolution order:
 //
@@ -11,15 +12,17 @@
 //   3. Flutter package assets.
 //
 // Flutter assets cannot be used directly as a Node working directory,
-// so the complete bridge tree is extracted to a temporary filesystem
-// directory before spawning Node.
+// so the bridge files are extracted to a temporary filesystem directory
+// before spawning Node.
 //
 // Package asset layout:
 //
-//   packages/ncm_api_enhanced/assets/bridge/
-//     ├── bridge.js
-//     ├── package.json
-//     └── node_modules/
+//   packages/ncm_api_enhanced/assets/bridge/dist/
+//     ├── bundle.js
+//     └── xhr-sync-worker.js
+//
+// `bundle.js` requires `./xhr-sync-worker.js`, therefore both files must
+// remain in the same directory.
 //
 // Normal consumer usage:
 //
@@ -45,8 +48,8 @@ class DesktopNcmBridge implements NcmBridge {
 
   /// Absolute filesystem path containing:
   ///
-  ///   bridge.js
-  ///   node_modules/
+  ///   bundle.js
+  ///   xhr-sync-worker.js
   ///
   /// If null, the bridge is resolved from:
   ///
@@ -80,24 +83,22 @@ class DesktopNcmBridge implements NcmBridge {
   /// Only non-null when the bridge came from Flutter assets.
   Directory? _extractedBridgeDir;
 
-  /// Actual package asset prefix.
+  /// Physical Flutter asset prefix.
   ///
-  /// The physical build output is:
+  /// The build output is:
   ///
   ///   flutter_assets/
   ///     packages/
   ///       ncm_api_enhanced/
   ///         assets/
   ///           bridge/
-  static const String _assetPrefix = 'packages/ncm_api_enhanced/assets/bridge/';
+  ///             dist/
+  ///               bundle.js
+  ///               xhr-sync-worker.js
+  static const String _assetPrefix =
+      'packages/ncm_api_enhanced/assets/bridge/dist/';
 
-  static const String _bridgeAsset = '${_assetPrefix}bridge.js';
-
-  static const String _apiMainRelativePath =
-      'node_modules/'
-      '@neteasecloudmusicapienhanced/'
-      'api/'
-      'main.js';
+  static const String _bridgeAsset = '${_assetPrefix}bundle.js';
 
   @override
   Stream<Map<String, dynamic>> get events => _events.stream;
@@ -148,7 +149,7 @@ class DesktopNcmBridge implements NcmBridge {
 
   /// Extract the complete bridge tree from Flutter's asset bundle.
   ///
-  /// Returns null only when the bridge asset is not present.
+  /// Returns null only when bundle.js is not present.
   ///
   /// Throws [BridgeError] when the asset exists but extraction or validation
   /// fails.
@@ -240,31 +241,37 @@ class DesktopNcmBridge implements NcmBridge {
   }
 
   /// Validate the extracted bridge tree.
+  ///
+  /// bundle.js contains:
+  ///
+  ///   require.resolve("./xhr-sync-worker.js")
+  ///
+  /// therefore the worker must be extracted beside bundle.js.
   void _validateExtractedBridge(Directory root) {
     final bridgeJs = File(
       '${root.path}'
       '${Platform.pathSeparator}'
-      'bridge.js',
+      'bundle.js',
     );
 
-    final apiMain = File(
+    final syncWorker = File(
       '${root.path}'
       '${Platform.pathSeparator}'
-      '${_apiMainRelativePath.replaceAll('/', Platform.pathSeparator)}',
+      'xhr-sync-worker.js',
     );
 
     if (!bridgeJs.existsSync()) {
       throw BridgeError(
-        'Flutter bridge extraction completed, but bridge.js is missing:\n'
+        'Flutter bridge extraction completed, but bundle.js is missing:\n'
         '${bridgeJs.path}',
       );
     }
 
-    if (!apiMain.existsSync()) {
+    if (!syncWorker.existsSync()) {
       throw BridgeError(
         'Flutter bridge extraction completed, but '
-        '@neteasecloudmusicapienhanced/api/main.js is missing:\n'
-        '${apiMain.path}',
+        'xhr-sync-worker.js is missing:\n'
+        '${syncWorker.path}',
       );
     }
   }
@@ -286,25 +293,29 @@ class DesktopNcmBridge implements NcmBridge {
     try {
       final root = await _resolveBridgeRoot();
 
-      final bridgeJs = File('$root${Platform.pathSeparator}bridge.js');
+      final bridgeJs = File(
+        '$root'
+        '${Platform.pathSeparator}'
+        'bundle.js',
+      );
+
+      final syncWorker = File(
+        '$root'
+        '${Platform.pathSeparator}'
+        'xhr-sync-worker.js',
+      );
 
       if (!bridgeJs.existsSync()) {
         throw BridgeError(
-          'bridge.js not found at:\n'
+          'bundle.js not found at:\n'
           '${bridgeJs.path}',
         );
       }
 
-      final apiMain = File(
-        '$root'
-        '${Platform.pathSeparator}'
-        '${_apiMainRelativePath.replaceAll('/', Platform.pathSeparator)}',
-      );
-
-      if (!apiMain.existsSync()) {
+      if (!syncWorker.existsSync()) {
         throw BridgeError(
-          '@neteasecloudmusicapienhanced/api/main.js not found at:\n'
-          '${apiMain.path}',
+          'xhr-sync-worker.js not found at:\n'
+          '${syncWorker.path}',
         );
       }
 
@@ -360,7 +371,7 @@ class DesktopNcmBridge implements NcmBridge {
       proc.exitCode.then(_onNodeExit);
 
       // ---------------------------------------------------------------------
-      // Wait for bridge.js readiness.
+      // Wait for bundle.js readiness.
       // ---------------------------------------------------------------------
 
       await _readyCompleter!.future.timeout(
@@ -397,7 +408,7 @@ class DesktopNcmBridge implements NcmBridge {
       _dispatch(event);
     }
 
-    // exitCode is normally the authoritative notification.
+    // exitCode is normally authoritative.
     //
     // Keep this as a fallback because stdout may close before the process
     // exit future is observed.
@@ -467,7 +478,7 @@ class DesktopNcmBridge implements NcmBridge {
 
     if (proc != null) {
       try {
-        proc.stdin.close();
+        await proc.stdin.close();
       } catch (_) {}
 
       try {
@@ -553,7 +564,7 @@ class DesktopNcmBridge implements NcmBridge {
 
     if (proc != null) {
       try {
-        proc.stdin.close();
+        await proc.stdin.close();
       } catch (_) {}
 
       try {
