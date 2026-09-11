@@ -103,6 +103,21 @@ So we split responsibilities cleanly:
 | `tool/refresh_bridge.sh` | Once per release, by the package author | Downloads upstream NCM npm + `cp -rL` into `bridge/node_modules/`, prunes `@unblockneteasemusic` (which contains private keys and isn't used at runtime) | Committed to git |
 | `hook/build.dart` | Once per consumer build, by the Dart SDK | Downloads libnode.so for the target Android ABI, extracts the right `.so`, copies to `android/src/main/jniLibs/<abi>/`, emits a `CodeAsset` for it | `~/.cache/ncm_api_enhanced/` (global) |
 
+After `refresh_bridge.sh`, you also need to:
+
+```sh
+cd bridge
+node scripts/generate_api.mjs   # regenerate the wrapper if module fns changed
+node build.mjs                  # bundle → dist/bundle.js
+git add bridge/
+git commit -m "refresh upstream NCM bundle"
+```
+
+`build.mjs` applies several esbuild `onLoad` patches that the upstream
+package needs to work inside Android's sandbox (no `/tmp`, no
+`generateConfig.js` in the bundle graph). See
+[`bridge/README.md`](assets/bridge/README.md) for the full rationale.
+
 **Result**: consumer-side `flutter pub get` is fully
 self-contained — no npm, no extra steps, no network at runtime.
 
