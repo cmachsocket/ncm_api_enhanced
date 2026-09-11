@@ -7,7 +7,11 @@ import 'package:native_toolchain_c/native_toolchain_c.dart';
 
 const _nodeVersion = '18.20.4';
 
-const _nodeAndroidZipUrl =
+// const _nodeAndroidZipUrl =
+//     'https://github.com/media-kit/libmpv-android-audio-build/releases/download/'
+//     'v1.1.8/default-arm64-v8a.jar';
+
+const _nodeAndroidReleaseUrl =
     'https://github.com/nodejs-mobile/nodejs-mobile/releases/download/'
     'v18.20.4/nodejs-mobile-v18.20.4-android.zip';
 
@@ -19,10 +23,10 @@ Future<void> main(List<String> args) async {
       return;
     }
 
-    // 现在才能访问 code
+    // 现在才能访问 code。
     final config = input.config.code;
 
-    // 第二层：只给 Android 构建
+    // 第二层：只给 Android 构建。
     if (config.targetOS != OS.android) {
       return;
     }
@@ -48,6 +52,48 @@ Future<void> main(List<String> args) async {
     final sharedDir = Directory.fromUri(input.outputDirectoryShared);
 
     await sharedDir.create(recursive: true);
+
+    // -----------------------------------------------------------------------
+    // Locate Dart SDK.
+    //
+    // Platform.resolvedExecutable:
+    //
+    //   <dart-sdk>/bin/dart
+    //
+    // Therefore:
+    //
+    //   parent        -> <dart-sdk>/bin
+    //   parent.parent -> <dart-sdk>
+    //
+    // dart_api_dl.h is located at:
+    //
+    //   <dart-sdk>/include/dart_api_dl.h
+    // -----------------------------------------------------------------------
+
+    final dartExecutable = File(Platform.resolvedExecutable);
+
+    final dartSdkDir = dartExecutable.parent.parent;
+
+    final dartIncludeDir = Directory('${dartSdkDir.path}/include');
+
+    final dartApiDlHeader = File('${dartIncludeDir.path}/dart_api_dl.h');
+
+    if (!await dartApiDlHeader.exists()) {
+      throw StateError(
+        'ncm_api_enhanced: dart_api_dl.h not found at '
+        '${dartApiDlHeader.path}',
+      );
+    }
+
+    print('ncm_api_enhanced: Dart SDK: ${dartSdkDir.path}');
+
+    print('ncm_api_enhanced: Dart include: ${dartIncludeDir.path}');
+
+    // Make the Dart API header a build dependency.
+    //
+    // This lets the hooks system invalidate/rebuild the native asset when
+    // the Dart SDK header changes.
+    output.dependencies.add(dartApiDlHeader.uri);
 
     // -----------------------------------------------------------------------
     // Download + extract libnode.so.
@@ -87,14 +133,28 @@ Future<void> main(List<String> args) async {
 
     if (!await bridgeSource.exists()) {
       throw StateError(
-        'ncm_api_enhanced: missing native/android/node_bridge.cpp',
+        'ncm_api_enhanced: missing '
+        'native/android/node_bridge.cpp',
       );
     }
 
     // -----------------------------------------------------------------------
     // CBuilder
     //
-    // node_bridge.cpp contains:
+    // node_bridge.cpp uses:
+    //
+    //     #include <dart_api_dl.h>
+    //
+    // native_toolchain_c does not automatically add the Dart SDK include
+    // directory, so it MUST be supplied through `includes`.
+    //
+    // This results in:
+    //
+    //     -I<dart-sdk>/include
+    //
+    // being passed to clang.
+    //
+    // node_bridge.cpp also contains:
     //
     //     namespace node {
     //       int Start(int argc, char** argv);
@@ -114,6 +174,13 @@ Future<void> main(List<String> args) async {
       assetName: _bridgeAssetName,
 
       sources: <String>[bridgeSource.path],
+
+      // dart_api_dl.h:
+      //
+      //   <dart-sdk>/include/dart_api_dl.h
+      //
+      // CBuilder 0.19.4 converts these entries to -I arguments.
+      includes: <String>[dartIncludeDir.path],
 
       libraries: <String>['node', 'log'],
 
@@ -141,7 +208,9 @@ Future<void> main(List<String> args) async {
     // -----------------------------------------------------------------------
     // Register libnode.so itself.
     //
-    // CBuilder registers libncm_node_bridge.so.
+    // CBuilder registers:
+    //
+    //     libncm_node_bridge.so
     //
     // libnode.so is a separate prebuilt dynamic library and must also be
     // exposed to the application bundle.
@@ -205,9 +274,9 @@ Future<void> _downloadNodeLibrary({
   // -------------------------------------------------------------------------
 
   if (!await zipFile.exists()) {
-    print('ncm_api_enhanced: downloading $_nodeAndroidZipUrl');
+    print('ncm_api_enhanced: downloading $_nodeAndroidReleaseUrl');
 
-    await _downloadFile(Uri.parse(_nodeAndroidZipUrl), zipFile);
+    await _downloadFile(Uri.parse(_nodeAndroidReleaseUrl), zipFile);
   }
 
   // -------------------------------------------------------------------------
@@ -230,7 +299,6 @@ Future<void> _downloadNodeLibrary({
   //     x86_64/
   //       libnode.so
   //
-  // See nodejs-mobile Android samples.
   // -------------------------------------------------------------------------
 
   final expectedPath = 'bin/$abi/libnode.so';
@@ -249,7 +317,7 @@ Future<void> _downloadNodeLibrary({
   if (nodeFile == null) {
     throw StateError(
       'ncm_api_enhanced: $expectedPath was not found in '
-      '$_nodeAndroidZipUrl',
+      '$_nodeAndroidReleaseUrl',
     );
   }
 

@@ -1,4 +1,3 @@
-```cpp
 // node_bridge.cpp
 //
 // Native bridge for embedded Node.js (nodejs-mobile v18.20.4).
@@ -1212,4 +1211,3 @@ int ncm_node_is_running() {
 }
 
 } // extern "C"
-```
