@@ -1,117 +1,247 @@
 // NCM API Enhanced — Dart ↔ Node bridge.
 //
-// Protocol: NDJSON over stdin/stdout. One JSON object per line.
-//   Request  (Dart -> Node): {"id": <int>, "method": "<moduleFn>", "params": { ... }}
-//   Response (Node -> Dart): {"id": <int>, "ok": true,  "result": { ... }}
-//                             {"id": <int>, "ok": false, "error":  { "message": "...", "stack": "..." }}
-//   Event    (Node -> Dart): {"event": "ready" | "log" | "fatal", "data": ...}
+// Protocol: NDJSON over stdin/stdout.
 //
-// In-flight requests are tracked in a Map keyed by id. The upstream NCM module
-// functions are pure async (each returns Promise<Response>), so node's event
-// loop handles concurrent Dart requests natively — no worker pool needed.
+// Request:
+//   {"id": <int>, "method": "<moduleFn>", "params": { ... }}
+//
+// Response:
+//   {"id": <int>, "ok": true,  "result": { ... }}
+//   {"id": <int>, "ok": false, "error": { "message": "...", "stack": "..." }}
+//
+// Event:
+//   {"event": "ready" | "log" | "fatal", "data": ...}
 
 'use strict'
 
 const readline = require('readline')
-const path = require('path')
-
-// Resolve the upstream module relative to this bridge script. The Flutter
-// assets bundle places @neteasecloudmusicapienhanced at <bridge>/node_modules/.
-const api = require('@neteasecloudmusicapienhanced/api')
 
 // ---------------------------------------------------------------------------
-// Protocol plumbing
+// API
 // ---------------------------------------------------------------------------
+//
+// generated_api.js MUST contain only statically analyzable imports/requires.
+// Do NOT require the original @neteasecloudmusicapienhanced/api/main.js here.
+//
+// This allows esbuild to recursively bundle:
+//
+//   module/*.js
+//   util/*.js
+//   plugins/*.js
+//   axios
+//   xml2js
+//   etc.
+//
+// into the final bundle.js.
+//
 
-let nextId = 1
-const inFlight = new Map() // id -> { resolve, reject, method }
+const api = require('./generated_api')
+
+// ---------------------------------------------------------------------------
+// Protocol
+// ---------------------------------------------------------------------------
 
 function send(obj) {
-  // stdout must always be one line; we control all callers so JSON.stringify
-  // will not emit newlines for our payload shape.
-  process.stdout.write(JSON.stringify(obj) + '\n')
-}
-
-function reply(id, ok, payload) {
-  const base = { id }
-  if (ok) {
-    base.ok = true
-    base.result = payload
-  } else {
-    base.ok = false
-    base.error = {
-      message: payload && payload.message ? payload.message : String(payload),
-      stack: payload && payload.stack ? payload.stack : undefined,
-    }
+  try {
+    process.stdout.write(
+      JSON.stringify(obj) + '\n',
+    )
+  } catch (err) {
+    // At this point there is very little we can safely do.
+    process.stderr.write(
+      `[ncm bridge] failed to write response: ${
+        err instanceof Error ? err.stack : String(err)
+      }\n`,
+    )
   }
-  send(base)
 }
 
-function fatal(message, err) {
+function replySuccess(id, result) {
   send({
-    event: 'fatal',
-    data: {
-      message,
-      stack: err && err.stack ? err.stack : undefined,
+    id,
+    ok: true,
+    result,
+  })
+}
+
+function replyError(id, err) {
+  const error =
+    err instanceof Error
+      ? err
+      : new Error(String(err))
+
+  send({
+    id,
+    ok: false,
+    error: {
+      message: error.message,
+      stack: error.stack,
     },
   })
 }
 
-process.on('uncaughtException', (err) => fatal('uncaughtException', err))
-process.on('unhandledRejection', (err) => fatal('unhandledRejection', err))
+function sendFatal(message, err) {
+  const error =
+    err instanceof Error
+      ? err
+      : err
+        ? new Error(String(err))
+        : null
+
+  send({
+    event: 'fatal',
+    data: {
+      message,
+      stack: error?.stack,
+    },
+  })
+}
 
 // ---------------------------------------------------------------------------
-// Dispatch
+// Request dispatch
 // ---------------------------------------------------------------------------
 
 async function handleRequest(req) {
-  const { id, method, params } = req
-  const fn = api[method]
-  if (typeof fn !== 'function') {
-    reply(id, false, new Error(`unknown method: ${method}`))
+  if (
+    !req ||
+    typeof req !== 'object'
+  ) {
     return
   }
-  // Forward to upstream — it already accepts (data, request) but as a library
-  // call it just needs (data). Upstream's main.js only injects a request
-  // helper when serving over HTTP; library mode skips that and uses the
-  // default axios path inside util/request.js (see module.exports wiring).
+
+  const id = req.id
+
+  if (!Number.isInteger(id)) {
+    sendFatal(
+      'request missing numeric id',
+      new Error(
+        `Invalid request id: ${JSON.stringify(id)}`,
+      ),
+    )
+    return
+  }
+
+  const method = req.method
+
+  if (
+    typeof method !== 'string' ||
+    method.length === 0
+  ) {
+    replyError(
+      id,
+      new Error('request missing method'),
+    )
+    return
+  }
+
+  const fn = api[method]
+
+  if (typeof fn !== 'function') {
+    replyError(
+      id,
+      new Error(`unknown method: ${method}`),
+    )
+    return
+  }
+
+  const params =
+    req.params &&
+    typeof req.params === 'object' &&
+    !Array.isArray(req.params)
+      ? req.params
+      : {}
+
   try {
-    const result = await fn(params || {})
-    reply(id, true, result)
+    const result = await fn(params)
+
+    replySuccess(id, result)
   } catch (err) {
-    reply(id, false, err)
+    replyError(id, err)
   }
 }
 
-const rl = readline.createInterface({ input: process.stdin })
-let buffer = ''
-rl.on('line', (line) => {
-  if (!line) return
-  let req
-  try {
-    req = JSON.parse(line)
-  } catch (err) {
-    fatal('invalid JSON on stdin: ' + line.slice(0, 200))
-    return
-  }
-  if (typeof req.id !== 'number') {
-    fatal('request missing numeric id: ' + line.slice(0, 200))
-    return
-  }
-  // Fire-and-forget — concurrent in-flight is fine, event loop handles it.
-  handleRequest(req)
+// ---------------------------------------------------------------------------
+// stdin
+// ---------------------------------------------------------------------------
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity,
 })
 
-rl.on('close', () => {
-  // Dart closed stdin → tear down. Reject any pending so the dart side wakes.
-  for (const [, entry] of inFlight) {
-    try {
-      entry.reject(new Error('bridge stdin closed'))
-    } catch (_) {}
+rl.on('line', (line) => {
+  line = line.trim()
+
+  if (!line) {
+    return
   }
-  inFlight.clear()
+
+  let request
+
+  try {
+    request = JSON.parse(line)
+  } catch (err) {
+    sendFatal(
+      'invalid JSON on stdin',
+      err,
+    )
+    return
+  }
+
+  // Do not await here.
+  //
+  // Multiple requests may be in flight simultaneously.
+  // Dart matches responses using the request id.
+  handleRequest(request).catch((err) => {
+    sendFatal(
+      'request handler failure',
+      err,
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// stdin closed
+// ---------------------------------------------------------------------------
+
+rl.on('close', () => {
+  // Dart closing stdin means the bridge is shutting down.
+  //
+  // There is no Node-side pending table because Dart owns the request
+  // lifecycle and PendingTable.
   process.exit(0)
 })
 
-// We're up.
-send({ event: 'ready', data: { pid: process.pid, node: process.version } })
+// ---------------------------------------------------------------------------
+// Process-level failures
+// ---------------------------------------------------------------------------
+
+process.on('uncaughtException', (err) => {
+  sendFatal(
+    'uncaughtException',
+    err,
+  )
+
+  process.exitCode = 1
+})
+
+process.on('unhandledRejection', (reason) => {
+  sendFatal(
+    'unhandledRejection',
+    reason,
+  )
+
+  process.exitCode = 1
+})
+
+// ---------------------------------------------------------------------------
+// Ready
+// ---------------------------------------------------------------------------
+
+send({
+  event: 'ready',
+  data: {
+    pid: process.pid,
+    node: process.version,
+  },
+})
