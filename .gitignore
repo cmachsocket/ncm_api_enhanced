@@ -1,0 +1,26 @@
+# Hook build artifacts
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# libnode.so — downloaded by hook/build.dart from nodejs-mobile releases.
+# ~62 MB per ABI; should NOT be committed.
+packages/ncm_api_enhanced/android/src/main/jniLibs/*/libnode.so
+
+# Bridge runtime generated for desktop dev runs.
+build/
+packages/ncm_api_enhanced/build/
+
+# Flutter generated files (root app)
+.packages
+.pub-cache/
+.pub/
+.idea/
+*.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/

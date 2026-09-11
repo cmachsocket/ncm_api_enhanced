@@ -1,0 +1,9 @@
+{
+  "name": "ncm_api_enhanced_bridge",
+  "version": "1.0.0",
+  "private": true,
+  "main": "bridge.js",
+  "dependencies": {
+    "@neteasecloudmusicapienhanced/api": "^4.40.1"
+  }
+}

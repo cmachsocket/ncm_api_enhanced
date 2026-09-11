@@ -1,0 +1,21 @@
+# Analysis configuration for ncm_api_enhanced.
+#
+# We intentionally limit the analyzer's scope to lib/, test/, and the
+# build hook. Vendored JS dependencies under bridge/node_modules and
+# downloaded libnode.so under android/src/main/jniLibs/ are excluded
+# to avoid false-positive lint reports and to keep `dart analyze`
+# runtime bounded.
+
+analyzer:
+  exclude:
+    - bridge/node_modules/**
+    - android/src/main/jniLibs/**
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
+
+include: package:flutter_lints/flutter.yaml
