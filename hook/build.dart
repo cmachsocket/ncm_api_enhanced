@@ -15,33 +15,23 @@ const _bridgeAssetName = 'native/node_bridge.dart';
 
 Future<void> main(List<String> args) async {
   await build(args, (input, output) async {
-    final config = input.config.code;
-
-    // -----------------------------------------------------------------------
-    // This package's native bridge is Android-only.
-    // -----------------------------------------------------------------------
-
-    if (config.targetOS != OS.android) {
-      return;
-    }
-
-    // -----------------------------------------------------------------------
-    // Native assets can be disabled by the build configuration.
-    // -----------------------------------------------------------------------
-
     if (!input.config.buildCodeAssets) {
       return;
     }
 
-    final architecture = config.targetArchitecture;
+    // 现在才能访问 code
+    final config = input.config.code;
 
+    // 第二层：只给 Android 构建
+    if (config.targetOS != OS.android) {
+      return;
+    }
+
+    final architecture = config.targetArchitecture;
     final abi = _androidAbi(architecture);
 
     if (abi == null) {
-      throw UnsupportedError(
-        'ncm_api_enhanced: unsupported Android architecture: '
-        '${architecture.name}',
-      );
+      throw UnsupportedError('Unsupported Android architecture: $architecture');
     }
 
     print(
