@@ -8,9 +8,7 @@
 packages/ncm_api_enhanced/android/src/main/jniLibs/*/libnode.so
 
 # Bridge runtime generated for desktop dev runs.
-build/
-packages/ncm_api_enhanced/build/
-
+/build/
 # Flutter generated files (root app)
 .packages
 .pub-cache/
