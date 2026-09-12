@@ -192,10 +192,99 @@ const fixRequestJs = {
         }
       }
 
+      // PATCH 3: axios set-cookie compat for bare runtime.
+      //
+      // Node axios's http adapter normalizes `set-cookie` to an array;
+      // bare-http1 returns the raw string. Upstream code expects an array;
+      // wrap defensively so we don't crash on .map().
+      {
+        const original = "        answer.cookie = (res.headers['set-cookie'] || []).map((x) =>"
+        const replacement = "        answer.cookie = (typeof res.headers['set-cookie'] === 'string' ? [res.headers['set-cookie']] : (res.headers['set-cookie'] || [])).map((x) =>"
+        const next = src.replace(original, replacement)
+        if (next !== src) {
+          console.log('[patch] wrapped set-cookie string→array in util/request.js')
+          src = next
+        } else {
+          console.warn('[patch] WARNING: set-cookie pattern not found in util/request.js')
+        }
+      }
+
       return { contents: src, loader: 'js' };
     });
   },
 };
+
+// util/crypto.js — Node's crypto.createDecipheriv accepts `null` for the IV
+// in ECB mode (no IV needed). bare-crypto's binding enforces
+// ArrayBuffer.isView(iv) and fails the bare-crypto assertion when iv is
+// null, even though ECB mode doesn't use it. Pass an empty Buffer instead.
+const fixCryptoNullIv = {
+  name: 'fix-crypto-null-iv',
+  setup(build) {
+    build.onLoad({ filter: /util[\\/]+crypto\.js$/ }, async (args) => {
+      let src = await fs.promises.readFile(args.path, 'utf8');
+      // aes-*-ecb mode doesn't take an IV; bare-crypto wants an empty
+      // Buffer where Node accepts null.
+      const original = `const cipher = crypto.createCipheriv(\`aes-\${key.length * 8}-ecb\`, key, null)`
+      const replacement = `const cipher = crypto.createCipheriv(\`aes-\${key.length * 8}-ecb\`, key, Buffer.alloc(0))`
+      let next = src.replace(original, replacement)
+      const original2 = `const decipher = crypto.createDecipheriv(\n    \`aes-\${key.length * 8}-ecb\`,\n    key,\n    null,\n  )`
+      const replacement2 = `const decipher = crypto.createDecipheriv(\n    \`aes-\${key.length * 8}-ecb\`,\n    key,\n    Buffer.alloc(0),\n  )`
+      next = next.replace(original2, replacement2)
+      if (next !== src) {
+        console.log('[patch] crypto.createDecipheriv: null IV → Buffer.alloc(0) in', path.relative(__dirname, args.path));
+        src = next
+      } else {
+        console.warn('[patch] WARNING: crypto.js IV pattern not found in', path.relative(__dirname, args.path));
+      }
+      return { contents: src, loader: 'js' }
+    })
+  },
+};
+// bundle graph. v2 mode requires jsdom + the Watchman SDK to compute an
+// anti-cheat token, which can't run on bare. We replace the module with a
+// no-op stub whose `getToken` returns ''. Callers asking for
+// `options.checkToken === 'v2'` will send an empty token; NCM will
+// reject it server-side (301 / anti-cheat error), but the bundle won't
+// throw at load time and other API paths keep working.
+//
+// Note: this only stubs v2. v3 is HTTP-only (see register_checktoken_v3.js)
+// and works on bare unmodified.
+//
+// Opt-in via BUILD_TARGET=bare. Default (node, node-mobile embed) keeps
+// the real upstream file.
+const isBareBuild = process.env.BUILD_TARGET === 'bare';
+const stubRegisterChecktokenV2 = isBareBuild
+  ? {
+      name: 'stub-register-checktoken-v2',
+      setup(build) {
+        build.onLoad({ filter: /register_checktoken_v2\.js$/ }, () => {
+          console.log('[patch] stubbing register_checktoken_v2 (bare build)')
+          return {
+            contents: [
+              "// PATCHED stub for bare — no jsdom, no Watchman SDK.",
+              "// v2 anti-cheat tokens are unobtainable in bare runtime;",
+              "// we return '' so callers degrade gracefully server-side.",
+              "module.exports = async () => ({",
+              "  status: 200,",
+              "  body: { code: 200, token: '', registered: false },",
+              "})",
+              "module.exports.getToken = async () => ''",
+            ].join('\n'),
+            loader: 'js',
+          }
+        })
+      },
+    }
+  : null;
+
+const plugins = [
+  shimXhrWorker,
+  fixChinaIpRangesPath,
+  fixRequestJs,
+  fixCryptoNullIv,
+]
+if (stubRegisterChecktokenV2) plugins.push(stubRegisterChecktokenV2);
 
 await esbuild.build({
   entryPoints: ['bridge.js'],
@@ -212,5 +301,5 @@ await esbuild.build({
   // the bundle — required because dist/ is shipped as a self-contained
   // asset with no node_modules.
   conditions: ['module-sync'],
-  plugins: [shimXhrWorker, fixChinaIpRangesPath, fixRequestJs],
+  plugins,
 });

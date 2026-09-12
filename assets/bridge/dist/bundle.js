@@ -24751,14 +24751,14 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7cl
       return decryptedBytes;
     };
     var aesEcbEncrypt = (key, plaintext) => {
-      const cipher = crypto2.createCipheriv(`aes-${key.length * 8}-ecb`, key, null);
+      const cipher = crypto2.createCipheriv(`aes-${key.length * 8}-ecb`, key, Buffer.alloc(0));
       return Buffer.concat([cipher.update(Buffer.from(plaintext)), cipher.final()]);
     };
     var aesEcbDecrypt = (key, ciphertext) => {
       const decipher = crypto2.createDecipheriv(
         `aes-${key.length * 8}-ecb`,
         key,
-        null
+        Buffer.alloc(0)
       );
       return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     };
@@ -202441,7 +202441,7 @@ var require_request = __commonJS({
         }
         axios(settings).then((res) => {
           const body = res.data;
-          answer.cookie = (res.headers["set-cookie"] || []).map(
+          answer.cookie = (typeof res.headers["set-cookie"] === "string" ? [res.headers["set-cookie"]] : res.headers["set-cookie"] || []).map(
             (x) => x.replace(/\s*Domain=[^(;|$)]+;*/, "")
           );
           try {
