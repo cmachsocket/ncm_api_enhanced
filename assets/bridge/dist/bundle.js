@@ -201938,6 +201938,7 @@ var require_register_checktoken_v2 = __commonJS({
       try {
         token = await fetchToken();
       } catch (e) {
+        console.error("[checkToken v2 FULL]", e.stack);
         logger.warn("[checkToken v2]", e.message);
       }
       return {
@@ -201949,6 +201950,7 @@ var require_register_checktoken_v2 = __commonJS({
       try {
         return await fetchToken();
       } catch (e) {
+        console.error("[checkToken v2 FULL]", e.stack);
         logger.warn("[checkToken v2]", e.message);
         return "";
       }
@@ -242006,7 +242008,7 @@ var require_middle_play_do_lottery = __commonJS({
       return request(
         `/api/middle/play/do/lottery`,
         data,
-        createOption(query, "eapi", "v2")
+        createOption(query, "eapi", "v3")
       );
     };
   }
@@ -244142,7 +244144,7 @@ var require_comment = __commonJS({
       return request(
         `/api/resource/comments/${query.t}`,
         data,
-        createOption(query, "eapi", "v2")
+        createOption(query, "eapi", "v3")
       );
     };
   }
