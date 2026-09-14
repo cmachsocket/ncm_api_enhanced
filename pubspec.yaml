@@ -40,6 +40,16 @@ flutter:
     - assets/bridge/bridge.js
     - assets/bridge/dist/
     - assets/bridge/dist/data/
+    # Windows desktop node runtime. We ship a standalone node.exe alongside
+    # the bundle so end users don't need to install Node.js themselves.
+    # x64 + arm64 — the bridge picks the right one at startup based on
+    # `Platform.numberOfProcessors` / arch detection.
+    #
+    # Cost: ~99 MB (x64) + ~87 MB (arm64) = ~186 MB extra in the Windows
+    # release. Acceptable because the alternative is requiring users to
+    # install Node 22+ manually on every Windows machine.
+    - assets/runtime/win-x64/node.exe
+    - assets/runtime/win-arm64/node.exe
   plugin:
     platforms:
 
