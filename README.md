@@ -1,14 +1,16 @@
 # ncm_api_enhanced
 
-Unofficial Netease Cloud Music API as a Flutter package. Embeds
-nodejs-mobile v18.20.4 (libnode.so on Android, NodeMobile.xcframework on
-iOS) and exposes the upstream `@neteasecloudmusicapienhanced/api`
-package's **439 module functions** as a Dart facade.
+Unofficial Netease Cloud Music API as a Flutter package. Embeds a
+[Bare](https://github.com/holepunchto/bare) runtime on Android (via
+[bare-kit](https://github.com/holepunchto/bare-kit)) and iOS (via
+NodeMobile.xcframework) and exposes the upstream
+`@neteasecloudmusicapienhanced/api` package's **439 module functions**
+as a Dart facade.
 
 | Platform | Mechanism |
 | --- | --- |
 | Linux / macOS / Windows | Spawns the system `node` binary via `dart:io` `Process.start`. The upstream module is loaded directly via `require()`. |
-| Android | Embeds `libnode.so` via a JNI bridge (`libncm_node_bridge.so`). `libnode.so` is downloaded by the Dart build hook (`hook/build.dart`) from the [nodejs-mobile v18.20.4 release](https://github.com/nodejs-mobile/nodejs-mobile/releases/tag/v18.20.4). |
+| Android | Embeds `libbare-kit.so` via a Flutter plugin module (`android/src/main/kotlin/.../NcmBareBridge.kt`). `libbare-kit.so` and `classes.jar` are downloaded by the Dart build hook (`hook/build.dart`) from the [bare-kit v2.4.3 release](https://github.com/holepunchto/bare-kit/releases/tag/v2.4.3). The Dart side talks to the plugin over `MethodChannel("ncm_bridge/methods")` and `EventChannel("ncm_bridge/events")`. |
 | iOS | Embeds `NodeMobile.xcframework`. The framework is added by `tool/patch_ios_pbxproj.rb` (or manually in Xcode). |
 
 ## Install

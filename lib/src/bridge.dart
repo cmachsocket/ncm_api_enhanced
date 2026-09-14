@@ -7,7 +7,8 @@
 //                 {"event": "ready"|"log"|"fatal", "data": ...}
 //
 // Implementations: [DesktopNcmBridge] (spawn system node on Linux/macOS/Windows)
-// and [MobileNcmBridge] (nodejs-mobile channel on Android/iOS).
+// and [MobileNcmBridge] (Bare runtime + MethodChannel/EventChannel on
+// Android; NodeMobile.xcframework on iOS).
 
 import 'dart:async';
 

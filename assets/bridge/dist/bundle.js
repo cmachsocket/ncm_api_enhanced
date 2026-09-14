@@ -201938,7 +201938,6 @@ var require_register_checktoken_v2 = __commonJS({
       try {
         token = await fetchToken();
       } catch (e) {
-        console.error("[checkToken v2 FULL]", e.stack);
         logger.warn("[checkToken v2]", e.message);
       }
       return {
@@ -201950,7 +201949,6 @@ var require_register_checktoken_v2 = __commonJS({
       try {
         return await fetchToken();
       } catch (e) {
-        console.error("[checkToken v2 FULL]", e.stack);
         logger.warn("[checkToken v2]", e.message);
         return "";
       }
@@ -242053,7 +242051,7 @@ var require_middle_play_do_lottery = __commonJS({
       return request(
         `/api/middle/play/do/lottery`,
         data,
-        createOption(query, "eapi", "v3")
+        createOption(query, "eapi", "v2")
       );
     };
   }
@@ -244189,7 +244187,7 @@ var require_comment = __commonJS({
       return request(
         `/api/resource/comments/${query.t}`,
         data,
-        createOption(query, "eapi", "v3")
+        createOption(query, "eapi", "v2")
       );
     };
   }
@@ -260265,14 +260263,19 @@ var require_generated_api = __commonJS({
 
 // bridge.js
 var readline = require("readline");
+var isBare = typeof Bare !== "undefined" && Bare;
+var ipc = isBare ? Bare.IPC : null;
+var stdin = isBare ? ipc : process.stdin;
+var stdout = isBare ? ipc : process.stdout;
+var stderr = isBare ? ipc : process.stderr;
 var api = require_generated_api();
 function send(obj) {
   try {
-    process.stdout.write(
+    stdout.write(
       JSON.stringify(obj) + "\n"
     );
   } catch (err) {
-    process.stderr.write(
+    stderr.write(
       `[ncm bridge] failed to write response: ${err instanceof Error ? err.stack : String(err)}
 `
     );
@@ -260362,7 +260365,7 @@ async function handleRequest(req) {
   }
 }
 var rl = readline.createInterface({
-  input: process.stdin,
+  input: stdin,
   crlfDelay: Infinity
 });
 rl.on("line", (line) => {

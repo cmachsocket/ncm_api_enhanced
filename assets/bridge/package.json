@@ -7,6 +7,15 @@
     "@neteasecloudmusicapienhanced/api": "^4.40.1"
   },
   "devDependencies": {
+    "bare-module-traverse": "^2.5.5",
+    "bare-node-runtime": "^1.5.0",
+    "bare-pack": "^1.5.1",
+    "bare-run": "^0.0.3",
+
+    "bare-link": "^3.3.0",
     "esbuild": "^0.28.2"
+  },
+  "scripts": {
+    "run": "bare-run dist/ncm.bundle"
   }
 }

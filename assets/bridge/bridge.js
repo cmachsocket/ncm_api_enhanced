@@ -17,6 +17,39 @@
 const readline = require('readline')
 
 // ---------------------------------------------------------------------------
+// I/O source
+// ---------------------------------------------------------------------------
+//
+// On the desktop / esbuild path the bridge runs as `node bridge.js` and
+// talks to the host over NDJSON on stdin/stdout/stderr. On the
+// bare-pack path it runs as a bare-kit Worklet — there is no stdin
+// or stdout file descriptor — so we route everything through
+// `BareKit.IPC` (the duplex stream exposed to the worklet by the
+// Kotlin host side). The wire protocol is unchanged (NDJSON, one
+// JSON object per line) so the Dart / Kotlin sides do not need to
+// know which runtime is hosting the worklet.
+//
+// `bare-kit` is a real npm package published by holepunchto. Its
+// worker-side entry is `require('bare-kit').IPC` which, when the
+// JS runs inside a bare-kit Worklet, returns the same global that
+// is reachable as `BareKit.IPC`. We pin `require('bare-kit')` here
+// because bundlers and the bare module loader both understand it.
+
+const isBare = typeof Bare !== 'undefined' && Bare
+
+//
+// When the worklet runs inside a bare-kit Worklet, the host sets the
+// `Bare.IPC` global to a bare-stream Duplex connected to the Android
+// `IPC` Java object. There is no npm package to require — `Bare.IPC`
+// is just a global, the same way `process` is a global under Node.
+
+const ipc = isBare ? Bare.IPC : null
+
+const stdin = isBare ? ipc : process.stdin
+const stdout = isBare ? ipc : process.stdout
+const stderr = isBare ? ipc : process.stderr
+
+// ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 //
@@ -43,12 +76,12 @@ const api = require('./generated_api')
 
 function send(obj) {
   try {
-    process.stdout.write(
+    stdout.write(
       JSON.stringify(obj) + '\n',
     )
   } catch (err) {
     // At this point there is very little we can safely do.
-    process.stderr.write(
+    stderr.write(
       `[ncm bridge] failed to write response: ${
         err instanceof Error ? err.stack : String(err)
       }\n`,
@@ -187,7 +220,7 @@ async function handleRequest(req) {
 // ---------------------------------------------------------------------------
 
 const rl = readline.createInterface({
-  input: process.stdin,
+  input: stdin,
   crlfDelay: Infinity,
 })
 

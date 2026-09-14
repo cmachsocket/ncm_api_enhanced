@@ -53,6 +53,9 @@ flutter:
   plugin:
     platforms:
 
+      android:
+        package: to.holepunch.ncm_enhanced
+        pluginClass: NcmBareBridge
       ios:
         pluginClass: NcmNodeBridge
       # Desktop (Linux/macOS/Windows) is pure Dart — it spawns the

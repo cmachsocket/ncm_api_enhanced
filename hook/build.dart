@@ -1,17 +1,65 @@
+// hook/build.dart
+//
+// Build hook for Android: bundle the bare-kit prebuild into the host
+// Flutter app so that libbare-kit.so (the libbare-kit.so from
+// holepunchto/bare-kit) is shipped alongside the plugin module's
+// classes.jar.
+//
+// Architecture:
+//
+//   Dart (mobile_bridge.dart)
+//       ↕ MethodChannel('ncm_bridge') + EventChannel
+//   Kotlin  (android/src/main/kotlin/.../NcmBareBridge.kt)
+//       ↕
+//   to.holepunch.bare.kit.Worklet + IPC  (Java API from bare-kit classes.jar)
+//       ↕ JNI
+//   libbare-kit.so  ← installed by this hook
+//
+// What this hook does:
+//
+//   1. Download https://github.com/holepunchto/bare-kit/releases/download/
+//      v2.4.3/prebuilds.zip into shared output.
+//
+//   2. Extract `prebuilds/android/bare-kit/jni/<abi>/libbare-kit.so`
+//      into shared output.
+//
+//   3. Extract `prebuilds/android/bare-kit/classes.jar` into
+//      android/libs/ — picked up by android/build.gradle's
+//      `implementation files("libs/bare-kit-classes.jar")` so the
+//      plugin module ships the bare-kit Java API to host apps.
+//
+//   4. Register libbare-kit.so as a Flutter code asset for the
+//      target ABI. Flutter copies the .so into the host app's
+//      lib/<abi>/ at build time.
+//
+// Why this design
+// ---------------
+//
+// Previous design (nodejs-mobile v18.20.4) used Dart FFI directly
+// against `libnode.so` with C++ glue that faked stdio pipes. bare-kit
+// has no equivalent C ABI — its Android side is Java + JNI, where
+// every entry point (Worklet.start / IPC.read / IPC.write) is
+// registered via `JNI_OnLoad` → `RegisterNatives` and is callable
+// only from a Java thread with a JNIEnv attached.
+//
+// The repository is therefore structured as a Flutter plugin: the
+// Kotlin plugin class implements FlutterPlugin, the Flutter build
+// toolchain auto-registers it with the host app, and MethodChannel
+// / EventChannel are the only surface Dart needs.
+
 import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
-import 'package:native_toolchain_c/native_toolchain_c.dart';
 
-const _nodeVersion = '18.20.4';
+const _bareKitVersion = 'v2.4.3';
 
-const _nodeAndroidReleaseUrl =
-    'https://github.com/nodejs-mobile/nodejs-mobile/releases/download/'
-    'v18.20.4/nodejs-mobile-v18.20.4-android.zip';
+const _bareKitPrebuildsUrl =
+    'https://github.com/holepunchto/bare-kit/releases/download/'
+    '$_bareKitVersion/prebuilds.zip';
 
-const _bridgeAssetName = 'native/node_bridge.dart';
+const _bridgeAssetName = 'native/bare_bridge.dart';
 
 Future<void> main(List<String> args) async {
   await build(args, (input, output) async {
@@ -25,23 +73,24 @@ Future<void> main(List<String> args) async {
       return;
     }
 
-    final architecture = config.targetArchitecture;
-    final abi = _androidAbi(architecture);
+    final abi = _androidAbi(config.targetArchitecture);
 
     if (abi == null) {
       throw UnsupportedError(
-        'Unsupported Android architecture: $architecture',
+        'ncm_api_enhanced: unsupported Android architecture: '
+        '${config.targetArchitecture}',
       );
     }
 
     print(
-      'ncm_api_enhanced: building Node.js Mobile $_nodeVersion '
+      'ncm_api_enhanced: building bare-kit $_bareKitVersion '
       'for Android $abi',
     );
 
-    // -----------------------------------------------------------------------
-    // Shared output directory.
-    // -----------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Shared output directory (one place Flutter reads from for every
+    // target ABI built in the same `flutter build` invocation).
+    // ---------------------------------------------------------------------
 
     final sharedDir = Directory.fromUri(
       input.outputDirectoryShared,
@@ -51,301 +100,201 @@ Future<void> main(List<String> args) async {
       recursive: true,
     );
 
-    // -----------------------------------------------------------------------
-    // Locate Dart SDK.
+    // ---------------------------------------------------------------------
+    // Download + extract bare-kit prebuilds.zip.
     //
-    //   <dart-sdk>/bin/dart
-    //          ^
-    //          |
-    //   Platform.resolvedExecutable
+    // Layout inside the zip:
     //
-    // Therefore:
-    //
-    //   parent        -> <dart-sdk>/bin
-    //   parent.parent -> <dart-sdk>
-    //
-    // Dart API DL:
-    //
-    //   <dart-sdk>/include/dart_api_dl.h
-    //   <dart-sdk>/include/dart_api_dl.c
-    // -----------------------------------------------------------------------
+    //   prebuilds/
+    //     android/
+    //       bare-kit/
+    //         classes.jar    ← Java API (to.holepunch.bare.kit.*)
+    //         jni/
+    //           arm64-v8a/libbare-kit.so
+    //           armeabi-v7a/libbare-kit.so
+    //           x86_64/libbare-kit.so
+    //           ...
+    // ---------------------------------------------------------------------
 
-    final dartExecutable = File(
-      Platform.resolvedExecutable,
+    final prebuildRoot = Directory(
+      '${sharedDir.path}/bare-kit-$_bareKitVersion',
     );
 
-    final dartSdkDir = dartExecutable.parent.parent;
-
-    final dartIncludeDir = Directory(
-      '${dartSdkDir.path}/include',
-    );
-
-    final dartApiDlHeader = File(
-      '${dartIncludeDir.path}/dart_api_dl.h',
-    );
-
-    final dartApiDlSource = File(
-      '${dartIncludeDir.path}/dart_api_dl.c',
-    );
-
-    if (!await dartApiDlHeader.exists()) {
-      throw StateError(
-        'ncm_api_enhanced: dart_api_dl.h not found at '
-        '${dartApiDlHeader.path}',
-      );
-    }
-
-    if (!await dartApiDlSource.exists()) {
-      throw StateError(
-        'ncm_api_enhanced: dart_api_dl.c not found at '
-        '${dartApiDlSource.path}',
-      );
-    }
-
-    print(
-      'ncm_api_enhanced: Dart SDK: '
-      '${dartSdkDir.path}',
-    );
-
-    print(
-      'ncm_api_enhanced: Dart include: '
-      '${dartIncludeDir.path}',
-    );
-
-    print(
-      'ncm_api_enhanced: Dart API DL source: '
-      '${dartApiDlSource.path}',
-    );
-
-    output.dependencies.add(
-      dartApiDlHeader.uri,
-    );
-
-    output.dependencies.add(
-      dartApiDlSource.uri,
-    );
-
-    // -----------------------------------------------------------------------
-    // Prepare dart_api_dl.c for the C++ CBuilder.
-    //
-    // native_toolchain_c's CBuilder is configured as Language.cpp, and
-    // RunCBuilder passes:
-    //
-    //     -x c++
-    //
-    // for ALL source files.
-    //
-    // Therefore passing the original dart_api_dl.c directly causes the
-    // official C source to be compiled as C++, which fails on Dart 3.10's
-    // DartApiEntry_function conversion.
-    //
-    // We create a private build copy and make the one C -> C++ conversion
-    // required by clang.
-    // -----------------------------------------------------------------------
-
-    final dartApiDlCpp = File(
-      '${sharedDir.path}/dart_api_dl_compat.cpp',
-    );
-
-    await _prepareDartApiDlCpp(
-      source: dartApiDlSource,
-      destination: dartApiDlCpp,
-    );
-
-    output.dependencies.add(
-      dartApiDlCpp.uri,
-    );
-
-    print(
-      'ncm_api_enhanced: prepared Dart API DL C++ source: '
-      '${dartApiDlCpp.path}',
-    );
-
-    // -----------------------------------------------------------------------
-    // Download + extract libnode.so.
-    // -----------------------------------------------------------------------
-
-    final nodeDir = Directory(
-      '${sharedDir.path}/nodejs-mobile-$_nodeVersion/$abi',
-    );
-
-    await nodeDir.create(
+    await prebuildRoot.create(
       recursive: true,
     );
 
-    final nodeLibrary = File(
-      '${nodeDir.path}/libnode.so',
+    final zipFile = File(
+      '${prebuildRoot.path}/prebuilds.zip',
     );
 
-    if (!await nodeLibrary.exists()) {
-      await _downloadNodeLibrary(
-        outputDirectory: sharedDir,
-        destination: nodeLibrary,
-        abi: abi,
+    if (!await zipFile.exists()) {
+      print(
+        'ncm_api_enhanced: downloading $_bareKitPrebuildsUrl',
+      );
+
+      await _downloadFile(
+        Uri.parse(_bareKitPrebuildsUrl),
+        zipFile,
       );
     }
 
-    if (!await nodeLibrary.exists()) {
+    final expectedSo =
+        'prebuilds/android/bare-kit/jni/$abi/libbare-kit.so';
+    final expectedClassesJar = 'prebuilds/android/bare-kit/classes.jar';
+
+    final soFile = File(
+      '${prebuildRoot.path}/libbare-kit.so',
+    );
+
+    //
+    // Plugin module's android/libs/ directory is the canonical
+    // location for local .jar files referenced by `implementation
+    // files(...)` in android/build.gradle. Put the jar there once
+    // so the same file is shared across every ABI build and is not
+    // regenerated on each `flutter build`.
+    //
+
+    final pluginAndroidRoot = Directory(
+      '${Directory.fromUri(input.packageRoot).path}/android',
+    );
+
+    final pluginLibsDir = Directory(
+      '${pluginAndroidRoot.path}/libs',
+    );
+
+    final classesJarFile = File(
+      '${pluginLibsDir.path}/bare-kit-classes.jar',
+    );
+
+    if (!await soFile.exists() || !await classesJarFile.exists()) {
+      await _extractAndroidArtifacts(
+        archivePath: zipFile.path,
+        soDestination: soFile,
+        classesJarDestination: classesJarFile,
+        expectedSo: expectedSo,
+        expectedClassesJar: expectedClassesJar,
+      );
+    }
+
+    if (!await soFile.exists()) {
       throw StateError(
-        'ncm_api_enhanced: failed to obtain libnode.so for $abi',
+        'ncm_api_enhanced: failed to obtain libbare-kit.so '
+        'for $abi (expected $expectedSo in '
+        '$_bareKitPrebuildsUrl)',
+      );
+    }
+
+    if (!await classesJarFile.exists()) {
+      throw StateError(
+        'ncm_api_enhanced: failed to obtain classes.jar '
+        '(expected $expectedClassesJar in '
+        '$_bareKitPrebuildsUrl)',
       );
     }
 
     print(
-      'ncm_api_enhanced: libnode.so: '
-      '${nodeLibrary.path}',
+      'ncm_api_enhanced: libbare-kit.so: ${soFile.path}',
     );
 
-    // -----------------------------------------------------------------------
-    // node_bridge.cpp
-    // -----------------------------------------------------------------------
-
-    final bridgeSource = File.fromUri(
-      input.packageRoot.resolve(
-        'native/android/node_bridge.cpp',
-      ),
+    print(
+      'ncm_api_enhanced: bare-kit classes.jar: ${classesJarFile.path}',
     );
 
-    if (!await bridgeSource.exists()) {
-      throw StateError(
-        'ncm_api_enhanced: missing '
-        'native/android/node_bridge.cpp',
-      );
-    }
-
-    // -----------------------------------------------------------------------
-    // CBuilder
+    // ---------------------------------------------------------------------
+    // Register libbare-kit.so as a code asset.
     //
-    // The resulting shared library contains:
-    //
-    //     node_bridge.cpp
-    //     dart_api_dl_compat.cpp
-    //
-    // and links:
-    //
-    //     libnode.so
-    //     liblog.so
-    //
-    // dart_api_dl_compat.cpp provides:
-    //
-    //     Dart_InitializeApiDL
-    //     Dart_PostCObject_DL
-    //     ...
-    //
-    // so libncm_node_bridge.so no longer leaves
-    // Dart_PostCObject_DL as an unresolved ELF symbol.
-    // -----------------------------------------------------------------------
-
-    final builder = CBuilder.library(
-      name: 'ncm_node_bridge',
-      assetName: _bridgeAssetName,
-
-      sources: <String>[
-        bridgeSource.path,
-        dartApiDlCpp.path,
-      ],
-
-      // dart_api_dl.h lives here.
-      includes: <String>[
-        dartIncludeDir.path,
-      ],
-
-      libraries: <String>[
-        'node',
-        'log',
-      ],
-
-      libraryDirectories: <String>[
-        nodeDir.path,
-      ],
-
-      language: Language.cpp,
-
-      cppLinkStdLib: 'c++_shared',
-
-      linkModePreference: LinkModePreference.dynamic,
-
-      pic: true,
-
-      std: 'c++17',
-
-      optimizationLevel: OptimizationLevel.o3,
-    );
-
-    await builder.run(
-      input: input,
-      output: output,
-    );
-
-    // -----------------------------------------------------------------------
-    // Register libnode.so.
-    // -----------------------------------------------------------------------
+    // Flutter's native_assets machinery copies the .so into the host
+    // app's lib/<abi>/ at build time. Kotlin code in the host app
+    // can then call System.loadLibrary("bare-kit") to dlopen it.
+    // ---------------------------------------------------------------------
 
     output.assets.code.add(
       CodeAsset(
         package: input.packageName,
-        name: 'native/libnode.dart',
+        name: _bridgeAssetName,
         linkMode: DynamicLoadingBundled(),
-        file: nodeLibrary.uri,
+        file: soFile.uri,
       ),
     );
 
     print(
-      'ncm_api_enhanced: registered libnode.so for $abi',
+      'ncm_api_enhanced: registered libbare-kit.so for $abi',
     );
   });
 }
 
 // ===========================================================================
-// Prepare Dart API DL C++ compatibility source
+// Extract libbare-kit.so + classes.jar from prebuilds.zip
 // ===========================================================================
 
-Future<void> _prepareDartApiDlCpp({
-  required File source,
-  required File destination,
+Future<void> _extractAndroidArtifacts({
+  required String archivePath,
+  required File soDestination,
+  required File classesJarDestination,
+  required String expectedSo,
+  required String expectedClassesJar,
 }) async {
-  var content = await source.readAsString();
+  print(
+    'ncm_api_enhanced: extracting '
+    '$expectedSo and $expectedClassesJar',
+  );
 
-  // Dart SDK's dart_api_dl.c contains a C-compatible conversion:
-  //
-  //     return entries->function;
-  //
-  // When the file is compiled as C++, the type is:
-  //
-  //     DartApiEntry_function == void*
-  //
-  // while entries->function is a function pointer.
-  //
-  // C accepts this conversion, but C++ does not.
-  //
-  // Explicitly cast it to the API's declared return type.
-  const original =
-      'if (strcmp(entries->name, name) == 0) return entries->function;';
+  final bytes = await File(archivePath).readAsBytes();
 
-  const replacement =
-      'if (strcmp(entries->name, name) == 0) '
-      'return reinterpret_cast<DartApiEntry_function>('
-      'entries->function);';
+  final archive = ZipDecoder().decodeBytes(
+    bytes,
+    verify: true,
+  );
 
-  if (!content.contains(original)) {
+  ArchiveFile? soEntry;
+  ArchiveFile? jarEntry;
+
+  for (final file in archive.files) {
+    final normalized = file.name.replaceAll('\\', '/');
+
+    if (normalized == expectedSo) {
+      soEntry = file;
+    } else if (normalized == expectedClassesJar) {
+      jarEntry = file;
+    }
+
+    if (soEntry != null && jarEntry != null) {
+      break;
+    }
+  }
+
+  if (soEntry == null) {
     throw StateError(
-      'ncm_api_enhanced: unexpected dart_api_dl.c layout. '
-      'Could not find the expected DartApiEntry lookup expression.',
+      'ncm_api_enhanced: $expectedSo was not found in '
+      '$_bareKitPrebuildsUrl',
     );
   }
 
-  content = content.replaceFirst(
-    original,
-    replacement,
-  );
+  if (jarEntry == null) {
+    throw StateError(
+      'ncm_api_enhanced: $expectedClassesJar was not found in '
+      '$_bareKitPrebuildsUrl',
+    );
+  }
 
-  await destination.parent.create(
-    recursive: true,
-  );
+  await soDestination.parent.create(recursive: true);
 
-  await destination.writeAsString(
-    content,
+  await soDestination.writeAsBytes(
+    soEntry.content as List<int>,
     flush: true,
+  );
+
+  await classesJarDestination.parent.create(recursive: true);
+
+  await classesJarDestination.writeAsBytes(
+    jarEntry.content as List<int>,
+    flush: true,
+  );
+
+  print(
+    'ncm_api_enhanced: extracted '
+    '${soDestination.path} and ${classesJarDestination.path}',
   );
 }
 
@@ -372,100 +321,6 @@ String? _androidAbi(
 }
 
 // ===========================================================================
-// Download + extract libnode.so
-// ===========================================================================
-
-Future<void> _downloadNodeLibrary({
-  required Directory outputDirectory,
-  required File destination,
-  required String abi,
-}) async {
-  final archiveDir = Directory(
-    '${outputDirectory.path}/nodejs-mobile-$_nodeVersion',
-  );
-
-  await archiveDir.create(
-    recursive: true,
-  );
-
-  final zipFile = File(
-    '${archiveDir.path}/'
-    'nodejs-mobile-v$_nodeVersion-android.zip',
-  );
-
-  // -------------------------------------------------------------------------
-  // Download ZIP if necessary.
-  // -------------------------------------------------------------------------
-
-  if (!await zipFile.exists()) {
-    print(
-      'ncm_api_enhanced: downloading '
-      '$_nodeAndroidReleaseUrl',
-    );
-
-    await _downloadFile(
-      Uri.parse(_nodeAndroidReleaseUrl),
-      zipFile,
-    );
-  }
-
-  // -------------------------------------------------------------------------
-  // Read ZIP.
-  // -------------------------------------------------------------------------
-
-  print(
-    'ncm_api_enhanced: extracting '
-    '$abi/libnode.so',
-  );
-
-  final bytes = await zipFile.readAsBytes();
-
-  final archive = ZipDecoder().decodeBytes(
-    bytes,
-    verify: true,
-  );
-
-  final expectedPath = 'bin/$abi/libnode.so';
-
-  ArchiveFile? nodeFile;
-
-  for (final file in archive.files) {
-    final normalized = file.name.replaceAll(
-      '\\',
-      '/',
-    );
-
-    if (normalized == expectedPath) {
-      nodeFile = file;
-      break;
-    }
-  }
-
-  if (nodeFile == null) {
-    throw StateError(
-      'ncm_api_enhanced: $expectedPath was not found in '
-      '$_nodeAndroidReleaseUrl',
-    );
-  }
-
-  final content = nodeFile.content;
-
-  await destination.parent.create(
-    recursive: true,
-  );
-
-  await destination.writeAsBytes(
-    content,
-    flush: true,
-  );
-
-  print(
-    'ncm_api_enhanced: extracted '
-    '${destination.path}',
-  );
-}
-
-// ===========================================================================
 // HTTP download
 // ===========================================================================
 
@@ -485,7 +340,7 @@ Future<void> _downloadFile(
 
   try {
     client.userAgent =
-        'ncm_api_enhanced/$_nodeVersion '
+        'ncm_api_enhanced/bare-kit-$_bareKitVersion '
         '(Dart build hook)';
 
     final request = await client.getUrl(url);
