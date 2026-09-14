@@ -42,7 +42,7 @@ import 'ndjson.dart';
 class DesktopNcmBridge implements NcmBridge {
   DesktopNcmBridge({
     this.bridgeRoot,
-    this.nodeExecutable = 'node',
+    this.nodeExecutable,
     Duration callTimeout = kDefaultCallTimeout,
   }) : _callTimeout = callTimeout;
 
@@ -59,8 +59,16 @@ class DesktopNcmBridge implements NcmBridge {
 
   /// Node executable name or absolute path.
   ///
-  /// Defaults to `node`.
-  final String nodeExecutable;
+  /// If null (default), the bridge picks one based on platform:
+  ///
+  ///   - Windows: a node.exe extracted from Flutter assets at
+  ///     `assets/bridge/runtime/<arch>/node.exe`. We ship both x64 and
+  ///     arm64 builds of Node 26.8.2 so end users don't need to install
+  ///     Node themselves.
+  ///   - Linux/macOS: `'node'` on PATH (the historical default).
+  ///   - Anywhere else (other Unix variants, sandboxed CI): the caller
+  ///     must supply an absolute path.
+  final String? nodeExecutable;
 
   final Duration _callTimeout;
 
@@ -289,8 +297,115 @@ class DesktopNcmBridge implements NcmBridge {
   }
 
   // ===========================================================================
+  // Node executable resolution
+  // ===========================================================================
+  //
+  // Three resolution paths, in order:
+  //   1. Caller-supplied `nodeExecutable` (absolute path or PATH name).
+  //   2. Windows: extract the embedded node.exe (x64 or arm64) from the
+  //      Flutter asset bundle into the same temp dir as bundle.js, and
+  //      return that absolute path.
+  //   3. Other platforms (Linux, macOS): fall back to `'node'` on PATH.
+  //
+  // We embed both x64 and arm64 node.exe and pick at runtime based on
+  // `Platform.numberOfProcessors` (heuristic: > 64 logical CPUs, or
+  // running under an arm64 dart vm, suggests arm64 — though on Windows
+  // we just check `PROCESSOR_ARCHITECTURE` via Platform.environment
+  // when it's an amd64 string we use x64; otherwise arm64).
+  Future<String> _resolveNodeExecutable() async {
+    // 1. Explicit override.
+    final explicit = nodeExecutable;
+    if (explicit != null && explicit.isNotEmpty) {
+      return explicit;
+    }
+
+    // 2. Windows: ship our own.
+    if (Platform.isWindows) {
+      // The asset bundle ships `assets/runtime/{win-x64,win-arm64}/node.exe`.
+      // The Flutter asset bundle re-locates these under the
+      // `packages/<pkg>/assets/...` prefix at runtime; we read them via
+      // rootBundle (binary access) and write to the same extracted
+      // directory as bundle.js so the temp cleanup still works.
+      final arch = _detectWindowsArch();
+      final assetPath =
+          'packages/ncm_api_enhanced/assets/runtime/$arch/node.exe';
+      final bytes = await rootBundle.load(assetPath);
+      final tmp = await Directory.systemTemp.createTemp('ncm_node_');
+      final file = File(
+        '${tmp.path}'
+        '${Platform.pathSeparator}'
+        'node.exe',
+      );
+      await file.writeAsBytes(
+        bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes),
+        flush: true,
+      );
+      // Stash the dir so shutdown() can clean it up alongside the
+      // bridge's _extractedBridgeDir. We piggyback on that one — see
+      // shutdown() below — rather than tracking a second tmp dir.
+      _extractedNodeDir = tmp;
+      stderr.writeln(
+        '[DesktopNcmBridge] extracted embedded node.exe '
+        '($arch, ${bytes.lengthInBytes ~/ 1024 ~/ 1024} MB) → ${file.path}',
+      );
+      return file.path;
+    }
+
+    // 3. Other platforms.
+    return 'node';
+  }
+
+  /// Detects Windows CPU arch from environment. Defaults to x64 if the
+  /// env var is missing (most Windows installs are x64 today).
+  String _detectWindowsArch() {
+    final env = Platform.environment;
+
+    // PROCESSOR_ARCHITEW6432 表示在 WOW64/模拟层下运行时的原生系统架构。
+    final arch =
+        env['PROCESSOR_ARCHITEW6432'] ?? env['PROCESSOR_ARCHITECTURE'] ?? '';
+
+    final normalized = arch.toLowerCase();
+
+    if (normalized.contains('arm64')) {
+      return 'win-arm64';
+    }
+
+    if (normalized.contains('amd64') || normalized.contains('x64')) {
+      return 'win-x64';
+    }
+
+    // Flutter Windows 桌面通常只有 x64 / arm64，默认 x64。
+    return 'win-x64';
+  }
+
+  /// Temp dir holding the extracted node.exe on Windows.
+  ///
+  /// Tracked separately from [_extractedBridgeDir] so we can clean both
+  /// up in shutdown() — but kept in sync with the same lifecycle.
+  Directory? _extractedNodeDir;
+
+  // ===========================================================================
   // Lifecycle
   // ===========================================================================
+  Future<void> _cleanupTempDirs() async {
+    final bridgeTmp = _extractedBridgeDir;
+    _extractedBridgeDir = null;
+
+    final nodeTmp = _extractedNodeDir;
+    _extractedNodeDir = null;
+
+    if (bridgeTmp != null) {
+      try {
+        await bridgeTmp.delete(recursive: true);
+      } catch (_) {}
+    }
+
+    if (nodeTmp != null) {
+      try {
+        await nodeTmp.delete(recursive: true);
+      } catch (_) {}
+    }
+  }
 
   @override
   Future<void> start() async {
@@ -344,8 +459,11 @@ class DesktopNcmBridge implements NcmBridge {
       // No package.json / node_modules tree is required here.
       // -----------------------------------------------------------------------
 
+      final exe = await _resolveNodeExecutable();
+      stderr.writeln('[DesktopNcmBridge] resolved node executable: $exe');
+
       _proc = await Process.start(
-        nodeExecutable,
+        exe,
         <String>[bridgeJs.path],
         workingDirectory: root,
         runInShell: false,
@@ -596,19 +714,7 @@ class DesktopNcmBridge implements NcmBridge {
 
     _pending.rejectAll(BridgeError('bridge failed to start'));
 
-    final tmp = _extractedBridgeDir;
-    _extractedBridgeDir = null;
-
-    if (tmp != null) {
-      stderr.writeln(
-        '[DesktopNcmBridge] deleting temporary bridge: '
-        '${tmp.path}',
-      );
-
-      try {
-        await tmp.delete(recursive: true);
-      } catch (_) {}
-    }
+    await _cleanupTempDirs();
   }
 
   // ===========================================================================
@@ -706,19 +812,7 @@ class DesktopNcmBridge implements NcmBridge {
       await _events.close();
     }
 
-    final tmp = _extractedBridgeDir;
-    _extractedBridgeDir = null;
-
-    if (tmp != null) {
-      stderr.writeln(
-        '[DesktopNcmBridge] deleting temporary bridge: '
-        '${tmp.path}',
-      );
-
-      try {
-        await tmp.delete(recursive: true);
-      } catch (_) {}
-    }
+    _cleanupTempDirs();
 
     stderr.writeln('[DesktopNcmBridge] shutdown complete.');
   }
