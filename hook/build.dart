@@ -92,13 +92,9 @@ Future<void> main(List<String> args) async {
     // target ABI built in the same `flutter build` invocation).
     // ---------------------------------------------------------------------
 
-    final sharedDir = Directory.fromUri(
-      input.outputDirectoryShared,
-    );
+    final sharedDir = Directory.fromUri(input.outputDirectoryShared);
 
-    await sharedDir.create(
-      recursive: true,
-    );
+    await sharedDir.create(recursive: true);
 
     // ---------------------------------------------------------------------
     // Download + extract bare-kit prebuilds.zip.
@@ -120,32 +116,20 @@ Future<void> main(List<String> args) async {
       '${sharedDir.path}/bare-kit-$_bareKitVersion',
     );
 
-    await prebuildRoot.create(
-      recursive: true,
-    );
+    await prebuildRoot.create(recursive: true);
 
-    final zipFile = File(
-      '${prebuildRoot.path}/prebuilds.zip',
-    );
+    final zipFile = File('${prebuildRoot.path}/prebuilds.zip');
 
     if (!await zipFile.exists()) {
-      print(
-        'ncm_api_enhanced: downloading $_bareKitPrebuildsUrl',
-      );
+      print('ncm_api_enhanced: downloading $_bareKitPrebuildsUrl');
 
-      await _downloadFile(
-        Uri.parse(_bareKitPrebuildsUrl),
-        zipFile,
-      );
+      await _downloadFile(Uri.parse(_bareKitPrebuildsUrl), zipFile);
     }
 
-    final expectedSo =
-        'prebuilds/android/bare-kit/jni/$abi/libbare-kit.so';
-    final expectedClassesJar = 'prebuilds/android/bare-kit/classes.jar';
+    final expectedSo = 'android/bare-kit/jni/$abi/libbare-kit.so';
+    final expectedClassesJar = 'android/bare-kit/classes.jar';
 
-    final soFile = File(
-      '${prebuildRoot.path}/libbare-kit.so',
-    );
+    final soFile = File('${prebuildRoot.path}/libbare-kit.so');
 
     //
     // Plugin module's android/libs/ directory is the canonical
@@ -159,13 +143,9 @@ Future<void> main(List<String> args) async {
       '${Directory.fromUri(input.packageRoot).path}/android',
     );
 
-    final pluginLibsDir = Directory(
-      '${pluginAndroidRoot.path}/libs',
-    );
+    final pluginLibsDir = Directory('${pluginAndroidRoot.path}/libs');
 
-    final classesJarFile = File(
-      '${pluginLibsDir.path}/bare-kit-classes.jar',
-    );
+    final classesJarFile = File('${pluginLibsDir.path}/bare-kit-classes.jar');
 
     if (!await soFile.exists() || !await classesJarFile.exists()) {
       await _extractAndroidArtifacts(
@@ -193,13 +173,9 @@ Future<void> main(List<String> args) async {
       );
     }
 
-    print(
-      'ncm_api_enhanced: libbare-kit.so: ${soFile.path}',
-    );
+    print('ncm_api_enhanced: libbare-kit.so: ${soFile.path}');
 
-    print(
-      'ncm_api_enhanced: bare-kit classes.jar: ${classesJarFile.path}',
-    );
+    print('ncm_api_enhanced: bare-kit classes.jar: ${classesJarFile.path}');
 
     // ---------------------------------------------------------------------
     // Register libbare-kit.so as a code asset.
@@ -218,9 +194,7 @@ Future<void> main(List<String> args) async {
       ),
     );
 
-    print(
-      'ncm_api_enhanced: registered libbare-kit.so for $abi',
-    );
+    print('ncm_api_enhanced: registered libbare-kit.so for $abi');
   });
 }
 
@@ -242,10 +216,7 @@ Future<void> _extractAndroidArtifacts({
 
   final bytes = await File(archivePath).readAsBytes();
 
-  final archive = ZipDecoder().decodeBytes(
-    bytes,
-    verify: true,
-  );
+  final archive = ZipDecoder().decodeBytes(bytes, verify: true);
 
   ArchiveFile? soEntry;
   ArchiveFile? jarEntry;
@@ -280,10 +251,7 @@ Future<void> _extractAndroidArtifacts({
 
   await soDestination.parent.create(recursive: true);
 
-  await soDestination.writeAsBytes(
-    soEntry.content as List<int>,
-    flush: true,
-  );
+  await soDestination.writeAsBytes(soEntry.content as List<int>, flush: true);
 
   await classesJarDestination.parent.create(recursive: true);
 
@@ -302,9 +270,7 @@ Future<void> _extractAndroidArtifacts({
 // Android ABI
 // ===========================================================================
 
-String? _androidAbi(
-  Architecture architecture,
-) {
+String? _androidAbi(Architecture architecture) {
   switch (architecture) {
     case Architecture.arm64:
       return 'arm64-v8a';
@@ -324,13 +290,8 @@ String? _androidAbi(
 // HTTP download
 // ===========================================================================
 
-Future<void> _downloadFile(
-  Uri url,
-  File destination,
-) async {
-  final temp = File(
-    '${destination.path}.download',
-  );
+Future<void> _downloadFile(Uri url, File destination) async {
+  final temp = File('${destination.path}.download');
 
   if (await temp.exists()) {
     await temp.delete();
@@ -353,9 +314,7 @@ Future<void> _downloadFile(
     if (response.statusCode != HttpStatus.ok) {
       await response.drain();
 
-      throw HttpException(
-        'HTTP ${response.statusCode} while downloading $url',
-      );
+      throw HttpException('HTTP ${response.statusCode} while downloading $url');
     }
 
     final sink = temp.openWrite();
@@ -367,12 +326,8 @@ Future<void> _downloadFile(
       rethrow;
     }
 
-    await temp.rename(
-      destination.path,
-    );
+    await temp.rename(destination.path);
   } finally {
-    client.close(
-      force: true,
-    );
+    client.close(force: true);
   }
 }
