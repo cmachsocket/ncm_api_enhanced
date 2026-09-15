@@ -28,8 +28,7 @@
 
 package to.holepunch.ncm_enhanced
 
-import android.content.Context
-import android.content.res.AssetManager
+import android.content.Contex
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -348,7 +347,7 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
                 result.error(
                     "bundle_not_found",
                     "extraction target missing after awaitExtraction: " +
-                        bundleFile.absolutePath,
+                            bundleFile.absolutePath,
                     null,
                 )
                 return
@@ -1001,16 +1000,8 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         )
 
         try {
-            /*
-             * `AssetManager.openInputStream(path)` is the compression-
-             * agnostic entry point: it returns an InputStream regardless
-             * of whether AAPT stored the asset uncompressed or DEFLATE-
-             * compressed inside the APK. We deliberately avoid
-             * `openFd()` here — `openFd()` requires the uncompressed
-             * path, which is a build-tool decision this plugin should
-             * not couple to.
-             */
-            assets.openInputStream(ASSET_BUNDLE_PATH).use { input ->
+
+            assets.open(ASSET_BUNDLE_PATH).use { input ->
 
                 FileOutputStream(temp).use { output ->
                     val buffer = ByteArray(COPY_BUFFER_SIZE)
@@ -1018,28 +1009,24 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
                     while (true) {
                         val count = input.read(buffer)
 
-                        if (count <= 0) {
+                        if (count < 0) {
                             break
                         }
 
-                        output.write(
-                            buffer,
-                            0,
-                            count,
-                        )
+                        if (count > 0) {
+                            output.write(
+                                buffer,
+                                0,
+                                count,
+                            )
+                        }
                     }
 
                     output.flush()
                 }
             }
 
-            /*
-             * Reject a zero-byte temp file before promoting it. This
-             * catches the case where `openInputStream` returned a
-             * silent zero-byte stream (missing or unreadable asset)
-             * — better to fail extraction than to leave a zero-byte
-             * bundle on disk for the next start().
-             */
+
             if (temp.length() == 0L) {
                 throw IllegalStateException(
                     "extract: source asset '$ASSET_BUNDLE_PATH' " +
