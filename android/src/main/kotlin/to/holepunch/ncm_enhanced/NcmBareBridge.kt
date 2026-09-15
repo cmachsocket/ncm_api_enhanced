@@ -65,14 +65,31 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
          *   pubspec.yaml
          *   mobile_bridge.dart
          */
+        // Flutter packages declared assets at
+        //   assets/flutter_assets/packages/<package_name>/<pubspec-relative-path>
+        // inside the APK. Our pubspec.yaml declares
+        //   assets/bridge/dist/
+        // so the bare bundle lives at
+        //   assets/flutter_assets/packages/ncm_api_enhanced/assets/bridge/dist/ncm.bundle
+        // — read only, locked in the APK, inaccessible to Dart's File API.
+        //
+        // Verified with `unzip -l app-arm64-v8a-release.apk | grep ncm.bundle`:
+        //   assets/flutter_assets/packages/ncm_api_enhanced/assets/bridge/dist/ncm.bundle
+        //
+        // We mirror that exact layout under <filesDir>, dropping only the
+        // APK's leading `assets/` directory (which is an AAPT packaging
+        // detail, not part of the asset name AssetManager exposes). The
+        // Dart side (mobile_bridge.dart::_tryResolveBridgeRootFromDataDir)
+        // probes <filesDir>/flutter_assets/<...>/ncm.bundle and is kept in
+        // sync with these constants.
         private const val ASSET_BUNDLE_PATH =
-            "flutter_assets/assets/bridge/dist/ncm.bundle"
+            "flutter_assets/packages/ncm_api_enhanced/assets/bridge/dist/ncm.bundle"
 
         private const val EXTRACTED_ROOT =
-            "flutter_assets/assets/bridge"
+            "flutter_assets/packages/ncm_api_enhanced/assets/bridge"
 
         private const val EXTRACTED_BUNDLE =
-            "flutter_assets/assets/bridge/dist/ncm.bundle"
+            "flutter_assets/packages/ncm_api_enhanced/assets/bridge/dist/ncm.bundle"
 
         /*
          * Defensive limit for a single NDJSON message.

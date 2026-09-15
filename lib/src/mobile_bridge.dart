@@ -357,7 +357,31 @@ class MobileNcmBridge implements NcmBridge {
       final dir = await _hostAppDataDir();
       if (dir == null) return null;
 
+      // Mirror the layout under <filesDir> that Kotlin
+      // (NcmBareBridge.kt::extractBridgeAssets) writes the bundle to.
+      //
+      // The APK path is:
+      //   assets/flutter_assets/packages/<pkg>/assets/bridge/dist/ncm.bundle
+      // (verified with `unzip -l app-arm64-v8a-release.apk | grep ncm.bundle`).
+      //
+      // Kotlin extracts AssetManager entries (which live under
+      // flutter_assets/) to <filesDir>, so the on-disk layout is:
+      //   <filesDir>/flutter_assets/packages/<pkg>/assets/bridge/dist/ncm.bundle
+      //
+      // The bridgeRoot we return here is the directory containing
+      // `dist/`, i.e. `<filesDir>/flutter_assets/packages/<pkg>/assets/bridge`.
+      // Everything else (bundle.js, xhr-sync-worker.js, data/, …) lives
+      // alongside dist/ under that same root.
+      //
+      // We probe the package-prefixed path first (the one Kotlin
+      // actually writes to). The other candidates are kept as a
+      // belt-and-braces fallback for old build outputs that did not
+      // yet mirror the APK's `packages/<pkg>/` prefix.
       final candidates = <String>[
+        '$dir${Platform.pathSeparator}flutter_assets'
+            '${Platform.pathSeparator}packages'
+            '${Platform.pathSeparator}ncm_api_enhanced'
+            '${Platform.pathSeparator}assets${Platform.pathSeparator}bridge',
         '$dir${Platform.pathSeparator}flutter_assets'
             '${Platform.pathSeparator}assets${Platform.pathSeparator}bridge',
         '$dir${Platform.pathSeparator}assets${Platform.pathSeparator}bridge',
