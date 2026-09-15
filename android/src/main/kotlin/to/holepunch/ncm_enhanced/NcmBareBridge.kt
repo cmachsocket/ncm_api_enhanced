@@ -42,7 +42,6 @@ import to.holepunch.bare.kit.IPC
 import to.holepunch.bare.kit.Worklet
 import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
@@ -319,6 +318,11 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         }
 
         try {
+            val context = appContext
+                ?: throw IllegalStateException(
+                    "handleStart: plugin is not attached to an engine",
+                )
+
             /*
              * Block until the bridge assets have been materialized into
              * <filesDir>. awaitExtraction() is idempotent and cached, so
@@ -331,7 +335,7 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
              * <filesDir>, dropping the leading `assets/` directory that
              * is an AAPT packaging detail. See extractBridgeAssets().
              */
-            val bundleFile = File(filesDir, EXTRACTED_BUNDLE)
+            val bundleFile = File(context.filesDir, EXTRACTED_BUNDLE)
 
             if (!bundleFile.isFile) {
                 /*
@@ -952,32 +956,27 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         )
 
         /*
-         * Determine the packaged asset size.
+         * Cache check.
          *
-         * openFd() is appropriate for APK assets that are stored uncompressed.
-         */
-        val expectedLength = assets.openFd(
-            ASSET_BUNDLE_PATH,
-        ).use { descriptor ->
-            descriptor.length
-        }
-
-        /*
-         * A correctly sized target is considered a valid cached extraction.
+         * We deliberately do not validate against the source asset size
+         * here. `AssetManager.openFd()` exposes the asset length but
+         * only for assets stored uncompressed in the APK — AAPT's
+         * compression decision is a build-tool choice that this plugin
+         * should not couple to. A future Flutter / AAPT version that
+         * flips the default to compressed would silently break any
+         * code path that assumes `openFd()` works.
          *
-         * The target is only installed after a complete temporary copy, so
-         * a process death during copying cannot leave a correctly-sized but
-         * incomplete final file.
+         * The cache is therefore validated by (a) existence and (b) a
+         * non-zero size. The atomic `.tmp → target` rename below
+         * guarantees a partial write can never produce a valid-looking
+         * cache hit.
          */
-        if (
-            target.isFile &&
-            target.length() == expectedLength
-        ) {
+        if (target.isFile && target.length() > 0) {
             Log.i(
                 TAG,
                 "extract: cache hit " +
                         "${target.absolutePath} " +
-                        "($expectedLength bytes)",
+                        "(${target.length()} bytes)",
             )
 
             return
@@ -986,8 +985,7 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         Log.i(
             TAG,
             "extract: copying " +
-                    "$ASSET_BUNDLE_PATH → ${target.absolutePath} " +
-                    "($expectedLength bytes)",
+                    "$ASSET_BUNDLE_PATH → ${target.absolutePath}",
         )
 
         /*
@@ -1002,44 +1000,50 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         )
 
         try {
-            val sourceDescriptor = assets.openFd(
-                ASSET_BUNDLE_PATH,
-            )
+            /*
+             * `AssetManager.openInputStream(path)` is the compression-
+             * agnostic entry point: it returns an InputStream regardless
+             * of whether AAPT stored the asset uncompressed or DEFLATE-
+             * compressed inside the APK. We deliberately avoid
+             * `openFd()` here — `openFd()` requires the uncompressed
+             * path, which is a build-tool decision this plugin should
+             * not couple to.
+             */
+            assets.openInputStream(ASSET_BUNDLE_PATH).use { input ->
 
-            try {
-                FileInputStream(
-                    sourceDescriptor.fileDescriptor,
-                ).use { input ->
+                FileOutputStream(temp).use { output ->
+                    val buffer = ByteArray(COPY_BUFFER_SIZE)
 
-                    FileOutputStream(temp).use { output ->
-                        val buffer = ByteArray(COPY_BUFFER_SIZE)
+                    while (true) {
+                        val count = input.read(buffer)
 
-                        while (true) {
-                            val count = input.read(buffer)
-
-                            if (count <= 0) {
-                                break
-                            }
-
-                            output.write(
-                                buffer,
-                                0,
-                                count,
-                            )
+                        if (count <= 0) {
+                            break
                         }
 
-                        output.flush()
+                        output.write(
+                            buffer,
+                            0,
+                            count,
+                        )
                     }
+
+                    output.flush()
                 }
-            } finally {
-                sourceDescriptor.close()
             }
 
-            if (temp.length() != expectedLength) {
+            /*
+             * Reject a zero-byte temp file before promoting it. This
+             * catches the case where `openInputStream` returned a
+             * silent zero-byte stream (missing or unreadable asset)
+             * — better to fail extraction than to leave a zero-byte
+             * bundle on disk for the next start().
+             */
+            if (temp.length() == 0L) {
                 throw IllegalStateException(
-                    "extract: size mismatch — " +
-                            "wrote ${temp.length()}, " +
-                            "expected $expectedLength",
+                    "extract: source asset '$ASSET_BUNDLE_PATH' " +
+                            "yielded zero bytes — apk asset may be " +
+                            "missing or unreadable",
                 )
             }
 
