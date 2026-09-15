@@ -31,6 +31,7 @@
 package to.holepunch.ncm_enhanced
 
 import android.content.Context
+import android.content.res.AssetManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -43,8 +44,12 @@ import io.flutter.plugin.common.MethodChannel
 import to.holepunch.bare.kit.IPC
 import to.holepunch.bare.kit.Worklet
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class NcmBareBridge : FlutterPlugin, ActivityAware {
   companion object {
@@ -67,6 +72,16 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
   private var methodChannel: MethodChannel? = null
   private var eventChannel: EventChannel? = null
   private var eventSink: EventChannel.EventSink? = null
+
+  // Bridge asset extraction runs once per app install. We hold a
+  // single-shot Future on the extraction thread so concurrent
+  // handleStart() callers all wait on the same work; subsequent
+  // restarts hit the size-keyed cache check and return immediately.
+  private val extractor = Executors.newSingleThreadExecutor { r ->
+    Thread(r, "ncm-bridge-extractor").apply { isDaemon = true }
+  }
+  private val extractStarted = AtomicBoolean(false)
+  @Volatile private var extractFuture: java.util.concurrent.Future<*>? = null
 
   // -----------------------------------------------------------------
   // FlutterPlugin lifecycle
@@ -109,6 +124,12 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
     } catch (_: Throwable) {
       // Detach path is best-effort; the process is going away.
     }
+
+    // Extraction runs on a daemon thread; we just need to stop
+    // accepting new tasks. An in-flight copy is safe to interrupt
+    // because the next start() in the next engine attach will
+    // pick up via the size-mismatch cache check and re-copy.
+    extractor.shutdownNow()
 
     methodChannel?.setMethodCallHandler(null)
     methodChannel = null
@@ -166,6 +187,21 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
     val bundlePath = call.argument<String>("bundlePath")
     if (bundlePath == null) {
       result.error("invalid_args", "bundlePath is required", null)
+      return
+    }
+
+    // Block start() until the bridge asset has been extracted from
+    // the read-only APK asset bundle into the host app's filesDir.
+    // _resolveBridgeRoot() in Dart probes filesDir/flutter_assets/...
+    // first; if extraction hasn't completed, that probe returns
+    // null and Dart throws BridgeError. Doing it here means the
+    // host app's first start() pays the one-time extraction cost
+    // and every subsequent start() hits the size-keyed cache.
+    try {
+      awaitExtraction()
+    } catch (e: Throwable) {
+      Log.e(TAG, "asset extraction failed", e)
+      result.error("extraction_failed", e.message, null)
       return
     }
 
@@ -329,5 +365,115 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         Log.w(TAG, "eventSink.success failed", e)
       }
     }
+  }
+
+  // -----------------------------------------------------------------
+  // Asset extraction
+  //
+  // Flutter packages declared assets at
+  // "flutter_assets/<path-from-pubspec>" inside the APK. Our
+  // pubspec.yaml declares "assets/bridge/dist/" so the bare bundle
+  // lives at "flutter_assets/assets/bridge/dist/ncm.bundle" — read
+  // only, locked in the APK, and inaccessible to Dart's File API.
+  //
+  // The Dart side (mobile_bridge.dart::_resolveBridgeRoot) probes
+  // <filesDir>/flutter_assets/assets/bridge/dist/ncm.bundle — so
+  // we must materialize the asset bundle there before the first
+  // start(). We do a streaming copy straight off AssetManager's
+  // FileDescriptor: ncm.bundle is ~35 MB, and pulling it through
+  // ByteArray/heap-based IO would balloon the JVM heap. Cache by
+  // comparing the asset's AssetFileDescriptor length with the
+  // on-disk file size — fast, no hashing, no race with concurrent
+  // writes (the executor is single-threaded so we serialize all
+  // extraction work ourselves).
+  // -----------------------------------------------------------------
+
+  // Path constants — must stay in lockstep with the Dart probe
+  // candidates in mobile_bridge.dart::_tryResolveBridgeRootFromDataDir
+  // and with the pubspec flutter.assets declaration.
+  private val assetBundlePath = "flutter_assets/assets/bridge/dist/ncm.bundle"
+  private val extractedRootFragment = "flutter_assets/assets/bridge"
+
+  private fun awaitExtraction() {
+    // First caller triggers the extraction; later callers (e.g. a
+    // start() that races a restart) await the same Future. After
+    // completion we drop the reference but leave the cached file
+    // on disk for next time.
+    val f = extractFuture ?: run {
+      if (!extractStarted.compareAndSet(false, true)) {
+        // Another caller beat us to the CAS but didn't manage to
+        // install a Future yet — spin until one is visible. In
+        // practice this is at most one extra iteration.
+        while (extractFuture == null) Thread.yield()
+        return extractFuture!!.get()
+      }
+      val future = extractor.submit<Unit> { extractBridgeAssets() }
+      extractFuture = future
+      future
+    }
+    f.get()
+  }
+
+  private fun extractBridgeAssets() {
+    val ctx = appContext ?: throw IllegalStateException(
+      "extractBridgeAssets: plugin is not attached to an engine",
+    )
+    val assets = ctx.assets
+    val filesDir = ctx.filesDir
+
+    // Mirror the Dart probe root exactly: <filesDir>/flutter_assets/assets/bridge
+    val targetDir = File(filesDir, extractedRootFragment).apply {
+      if (!exists() && !mkdirs()) {
+        throw IllegalStateException("cannot create $absolutePath")
+      }
+    }
+    val targetDistDir = File(targetDir, "dist").apply {
+      if (!exists() && !mkdirs()) {
+        throw IllegalStateException("cannot create $absolutePath")
+      }
+    }
+    val target = File(targetDistDir, "ncm.bundle")
+
+    val assetFd = assets.openFd(assetBundlePath)
+    val expectedLength = assetFd.length
+    assetFd.close()
+
+    if (target.exists() && target.length() == expectedLength) {
+      Log.i(TAG, "extract: cache hit ${target.absolutePath} ($expectedLength bytes)")
+      return
+    }
+
+    Log.i(TAG, "extract: copying $assetBundlePath → ${target.absolutePath} " +
+      "($expectedLength bytes)")
+
+    // Stream the asset to disk so the 35 MB bundle never sits in
+    // the JVM heap. openFd() gives us a FileDescriptor that survives
+    // a second open() through FileInputStream.
+    val srcFd = assets.openFd(assetBundlePath)
+    try {
+      FileInputStream(srcFd.fileDescriptor).use { input ->
+        FileOutputStream(target).use { output ->
+          val buf = ByteArray(64 * 1024)
+          while (true) {
+            val n = input.read(buf)
+            if (n <= 0) break
+            output.write(buf, 0, n)
+          }
+          output.flush()
+        }
+      }
+    } finally {
+      srcFd.close()
+    }
+
+    if (target.length() != expectedLength) {
+      target.delete()
+      throw IllegalStateException(
+        "extract: size mismatch after copy — wrote ${target.length()}, " +
+          "expected $expectedLength. Partial file deleted.",
+      )
+    }
+
+    Log.i(TAG, "extract: done ${target.absolutePath} (${target.length()} bytes)")
   }
 }

@@ -12,7 +12,11 @@ repository: https://github.com/your-org/ncm_api_enhanced
 
 environment:
   sdk: ^3.10.0
-  flutter: ">=3.27.0"
+  # Platform-specific assets (the `platforms:` filter under each
+  # flutter.assets entry) require Flutter 3.41+. We use it to keep
+  # the ~200 MB of Windows node.exe binaries out of the
+  # Android / iOS / Linux / macOS release bundles.
+  flutter: ">=3.41.0"
 
 dependencies:
   flutter:
@@ -38,18 +42,50 @@ dev_dependencies:
 flutter:
   assets:
     - assets/bridge/bridge.js
-    - assets/bridge/dist/
+    - path: assets/bridge/dist/bundle.js
+      platforms:
+        - linux
+        - macos
+        - windows
+    - path: assets/bridge/dist/xhr-sync-worker.js
+      platforms:
+        - linux
+        - macos
+        - windows
+    - path: assets/bridge/dist/ncm.bundle
+      platforms:
+        - android
+        - ios
+      
+      
     - assets/bridge/dist/data/
-    # Windows desktop node runtime. We ship a standalone node.exe alongside
-    # the bundle so end users don't need to install Node.js themselves.
-    # x64 + arm64 — the bridge picks the right one at startup based on
-    # `Platform.numberOfProcessors` / arch detection.
+    # Windows desktop node runtime.
     #
-    # Cost: ~99 MB (x64) + ~87 MB (arm64) = ~186 MB extra in the Windows
-    # release. Acceptable because the alternative is requiring users to
-    # install Node 22+ manually on every Windows machine.
-    - assets/runtime/win-x64/node.exe
-    - assets/runtime/win-arm64/node.exe
+    # We ship a standalone node.exe alongside the bundle so end
+    # users don't need to install Node themselves. x64 + arm64 —
+    # the bridge picks at runtime based on PROCESSOR_ARCHITECTURE.
+    # Cost: ~99 MB (x64) + ~87 MB (arm64) = ~186 MB extra in the
+    # Windows release. Acceptable because the alternative is
+    # requiring Windows users to install Node 22+ manually.
+    #
+    # The `platforms: [windows]` filter keeps these binaries out of
+    # every non-Windows consumer release. Without it the Android
+    # APK / iOS IPA / Linux snap / macOS .app all carry the Windows
+    # runtime they will never need. The filter requires Flutter
+    # 3.41+ (see environment.flutter constraint above); older SDKs
+    # silently ignore the filter and bundle everywhere.
+    #
+    # Note: pub publish still ships the binaries in the plugin
+    # tarball regardless of `platforms:` — Flutter only consults
+    # this filter at consumer build time, not at package publish.
+    # That is intentional here: the file *must* be present on
+    # disk so Flutter can locate it at Windows build time.
+    - path: assets/runtime/win-x64/node.exe
+      platforms:
+        - windows
+    - path: assets/runtime/win-arm64/node.exe
+      platforms:
+        - windows
   plugin:
     platforms:
 
