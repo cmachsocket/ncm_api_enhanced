@@ -31,7 +31,6 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -265,32 +264,18 @@ class MobileNcmBridge implements NcmBridge {
     _log('START: state initialized');
 
     try {
-      _log('START: resolving bridge root');
-      final bridgeRoot = await _resolveBridgeRoot();
-
-      _log('START: bridgeRoot=$bridgeRoot');
-
-      // bare-kit's Worklet.start takes the bundle as inline bytes,
-      // so we hand the Kotlin shim the file path and let it read
-      // the .bundle off disk.
-      final bundlePath = '$bridgeRoot${Platform.pathSeparator}'
-          'dist${Platform.pathSeparator}ncm.bundle';
-
-      _log('START: bundlePath=$bundlePath');
-
-      final bundleFile = File(bundlePath);
-      if (!await bundleFile.exists()) {
-        throw BridgeError(
-          'MobileNcmBridge: ncm.bundle not found at $bundlePath',
-        );
-      }
-
       _log('START: invoking methods.start');
 
+      // The Kotlin shim is the single owner of asset extraction,
+      // bundle path resolution, and Worklet startup. Dart used to
+      // probe <filesDir>/flutter_assets/... itself, which coupled
+      // Dart to Android's APK asset layout (notably the
+      // `packages/<pkg>/` prefix) and added a redundant MethodChannel
+      // round-trip. start() is now a black box: the shim blocks
+      // until the bundle is loaded and emits {type: 'ready'} over
+      // EventChannel; we wait on that below.
       try {
-        await _methods.invokeMethod<void>('start', <String, Object?>{
-          'bundlePath': bundlePath,
-        });
+        await _methods.invokeMethod<void>('start');
       } on PlatformException catch (e, st) {
         throw BridgeError(
           'native bridge start failed: ${e.code} ${e.message}',
@@ -329,97 +314,17 @@ class MobileNcmBridge implements NcmBridge {
   }
 
   // ==========================================================================
-  // Flutter assets
+  // Bridge root resolution — removed.
+  //
+  // The previous design made Dart probe <filesDir>/flutter_assets/...
+  // to find the extracted ncm.bundle, with the Kotlin shim handing out
+  // the filesDir path over a `dataDir` MethodChannel and Dart doing the
+  // path arithmetic. That coupled Dart to Android's APK asset layout
+  // (notably the `packages/<pkg>/` prefix that AAPT adds), and added a
+  // redundant round-trip on every start(). The Kotlin shim is now the
+  // single owner of asset extraction + Worklet.start; Dart treats
+  // methods.start() as a black box. See NcmBareBridge.kt::handleStart.
   // ==========================================================================
-
-  Future<String> _resolveBridgeRoot() async {
-    const explicitRoot = String.fromEnvironment('NCM_BRIDGE_ROOT');
-    if (explicitRoot.isNotEmpty) {
-      return explicitRoot;
-    }
-
-    // Try the host app's data dir first (Android usually extracts
-    // bundled assets there on first run).
-    final candidate = await _tryResolveBridgeRootFromDataDir();
-    if (candidate != null) return candidate;
-
-    throw BridgeError(
-      'MobileNcmBridge: could not resolve bridge root. '
-      'Set NCM_BRIDGE_ROOT or ensure the host app extracted the '
-      'assets/bridge/ asset bundle before calling start().',
-    );
-  }
-
-  Future<String?> _tryResolveBridgeRootFromDataDir() async {
-    // The host app is expected to copy the bridge assets to its
-    // filesDir at startup. We probe well-known layouts.
-    try {
-      final dir = await _hostAppDataDir();
-      if (dir == null) return null;
-
-      // Mirror the layout under <filesDir> that Kotlin
-      // (NcmBareBridge.kt::extractBridgeAssets) writes the bundle to.
-      //
-      // The APK path is:
-      //   assets/flutter_assets/packages/<pkg>/assets/bridge/dist/ncm.bundle
-      // (verified with `unzip -l app-arm64-v8a-release.apk | grep ncm.bundle`).
-      //
-      // Kotlin extracts AssetManager entries (which live under
-      // flutter_assets/) to <filesDir>, so the on-disk layout is:
-      //   <filesDir>/flutter_assets/packages/<pkg>/assets/bridge/dist/ncm.bundle
-      //
-      // The bridgeRoot we return here is the directory containing
-      // `dist/`, i.e. `<filesDir>/flutter_assets/packages/<pkg>/assets/bridge`.
-      // Everything else (bundle.js, xhr-sync-worker.js, data/, …) lives
-      // alongside dist/ under that same root.
-      //
-      // We probe the package-prefixed path first (the one Kotlin
-      // actually writes to). The other candidates are kept as a
-      // belt-and-braces fallback for old build outputs that did not
-      // yet mirror the APK's `packages/<pkg>/` prefix.
-      final candidates = <String>[
-        '$dir${Platform.pathSeparator}flutter_assets'
-            '${Platform.pathSeparator}packages'
-            '${Platform.pathSeparator}ncm_api_enhanced'
-            '${Platform.pathSeparator}assets${Platform.pathSeparator}bridge',
-        '$dir${Platform.pathSeparator}flutter_assets'
-            '${Platform.pathSeparator}assets${Platform.pathSeparator}bridge',
-        '$dir${Platform.pathSeparator}assets${Platform.pathSeparator}bridge',
-        '$dir${Platform.pathSeparator}bridge',
-      ];
-
-      for (final path in candidates) {
-        final probe = File(
-          '$path${Platform.pathSeparator}dist${Platform.pathSeparator}'
-          'ncm.bundle',
-        );
-        if (await probe.exists()) {
-          return path;
-        }
-      }
-    } catch (e) {
-      _log('resolveBridgeRoot: probe failed error=$e');
-    }
-
-    return null;
-  }
-
-  Future<Directory?> _hostAppDataDir() async {
-    // Try a MethodChannel first so the host app can hand us the
-    // exact filesDir without us hard-coding a path.
-    try {
-      final path = await _methods.invokeMethod<String>('dataDir');
-      if (path != null && path.isNotEmpty) {
-        return Directory(path);
-      }
-    } on MissingPluginException {
-      // Fall through to the platform path guess.
-    } catch (e) {
-      _log('dataDir: MethodChannel failed error=$e');
-    }
-
-    return null;
-  }
 
   // ==========================================================================
   // NDJSON dispatch

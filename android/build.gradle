@@ -25,8 +25,23 @@
 //      inside the host APK. Worklet.start() loads it via
 //      System.loadLibrary("bare-kit").
 
+// plugins { id "com.android.library" } alone does NOT compile Kotlin
+// sources — that requires `id "org.jetbrains.kotlin.android"` as
+// well. Without the Kotlin plugin, AGP silently skips .kt files
+// in src/main/kotlin/, so NcmBareBridge.kt never makes it into the
+// compiled .jar / .dex. The symptom is `GeneratedPluginRegistrant`
+// catching ClassNotFoundException for to.holepunch.ncm_enhanced
+// .NcmBareBridge and silently failing plugin registration. CI will
+// build "successfully" but the resulting APK has no MethodChannel
+// for ncm_bridge/methods at runtime.
+//
+// Version intentionally omitted — the host app's settings.gradle.kts
+// is expected to declare the version with `apply false` in its root
+// `plugins` block (Flutter creates this with the matching Kotlin
+// version it shipped). The plugin reuses whatever the host resolves.
 plugins {
   id "com.android.library"
+  id "org.jetbrains.kotlin.android"
 }
 
 group = "to.holepunch"
@@ -49,11 +64,7 @@ android {
     jvmTarget = "17"
   }
 
-  sourceSets {
-    main {
-      java.srcDirs += "src/main/kotlin"
-    }
-  }
+
 }
 
 dependencies {

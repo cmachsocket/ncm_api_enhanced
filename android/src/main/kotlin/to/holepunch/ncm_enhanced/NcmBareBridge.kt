@@ -279,23 +279,34 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         result: MethodChannel.Result,
     ) {
         when (call.method) {
-            "start" -> handleStart(call, result)
+            "start" -> handleStart(result)
             "write" -> handleWrite(call, result)
             "shutdown" -> handleShutdown(result)
             "isRunning" -> result.success(worklet != null)
-            "dataDir" -> handleDataDir(result)
             else -> result.notImplemented()
         }
     }
 
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Start
-    // ---------------------------------------------------------------------------
+    //
+    // The Dart side calls `methods.start()` with no arguments. The Kotlin
+    // shim is the single owner of:
+    //
+    //   1. Knowing where the bridge assets live inside the APK
+    //      (AssetManager — read-only).
+    //   2. Materializing them into a writable directory (<filesDir>).
+    //   3. Resolving the on-disk path of ncm.bundle.
+    //   4. Loading it into a Worklet and opening IPC.
+    //
+    // Dart used to do (3) by probing <filesDir>/flutter_assets/... on its
+    // own. That made Dart aware of Android's APK asset layout, broke every
+    // time the layout changed (the `packages/<pkg>/` prefix in particular),
+    // and added a redundant MethodChannel round-trip. Self-contained: the
+    // Dart side now treats start() as a black box.
+    // -------------------------------------------------------------------------
 
-    private fun handleStart(
-        call: MethodCall,
-        result: MethodChannel.Result,
-    ) {
+    private fun handleStart(result: MethodChannel.Result) {
         synchronized(lifecycleLock) {
             if (worklet != null) {
                 result.error(
@@ -307,30 +318,32 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
             }
         }
 
-        val bundlePath = call.argument<String>("bundlePath")
-
-        if (bundlePath.isNullOrBlank()) {
-            result.error(
-                "invalid_args",
-                "bundlePath is required",
-                null,
-            )
-            return
-        }
-
         try {
             /*
-             * Ensure the bridge assets are materialized before Dart tries to
-             * resolve/use them.
+             * Block until the bridge assets have been materialized into
+             * <filesDir>. awaitExtraction() is idempotent and cached, so
+             * every start() after the first pays zero I/O.
              */
             awaitExtraction()
 
-            val bundleFile = File(bundlePath)
+            /*
+             * The extraction target mirrors the APK asset layout under
+             * <filesDir>, dropping the leading `assets/` directory that
+             * is an AAPT packaging detail. See extractBridgeAssets().
+             */
+            val bundleFile = File(filesDir, EXTRACTED_BUNDLE)
 
             if (!bundleFile.isFile) {
+                /*
+                 * Should be unreachable: extractBridgeAssets() either
+                 * produced a complete file or threw. Kept as a defensive
+                 * check because the cache check (size match) is the only
+                 * thing standing between us and an incomplete file.
+                 */
                 result.error(
                     "bundle_not_found",
-                    "no such file: $bundlePath",
+                    "extraction target missing after awaitExtraction: " +
+                        bundleFile.absolutePath,
                     null,
                 )
                 return
@@ -797,29 +810,14 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
         }
     }
 
-    // ---------------------------------------------------------------------------
-    // dataDir
-    // ---------------------------------------------------------------------------
-
-    private fun handleDataDir(
-        result: MethodChannel.Result,
-    ) {
-        val context = appContext
-
-        if (context == null) {
-            result.error(
-                "no_context",
-                "plugin is not attached to an engine",
-                null,
-            )
-            return
-        }
-
-        result.success(
-            context.filesDir.absolutePath,
-        )
-    }
-
+    // -------------------------------------------------------------------------
+    // dataDir — removed.
+    //
+    // The previous design leaked the host app's filesDir into Dart so Dart
+    // could probe for the extracted bridge assets itself. The Kotlin shim is
+    // now the single owner of asset extraction and bundle path resolution,
+    // so Dart never needs to know the filesDir path. See handleStart().
+    // -------------------------------------------------------------------------
     // ---------------------------------------------------------------------------
     // EventChannel
     // ---------------------------------------------------------------------------
