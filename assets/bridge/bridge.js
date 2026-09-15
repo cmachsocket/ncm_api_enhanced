@@ -13,6 +13,15 @@
 //   {"event": "ready" | "log" | "fatal", "data": ...}
 
 'use strict'
+console.error('=== Bare runtime ===')
+console.error('process.platform =', process.platform)
+console.error('process.arch =', process.arch)
+
+try {
+  console.error('require.addon.host =', require.addon.host)
+} catch (e) {
+  console.error('require.addon.host ERROR =', e.message)
+}
 
 const readline = require('readline')
 
