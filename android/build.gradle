@@ -64,7 +64,14 @@ dependencies {
   // `prebuilds/android/bare-kit/classes.jar`.
   implementation files("libs/bare-kit-classes.jar")
 
-  // Flutter embedding — required so we can implement FlutterPlugin
-  // and register MethodChannel / EventChannel handlers.
-  implementation "io.flutter:flutter_embedding:1.0.0"
+  // Flutter embedding (FlutterPlugin, MethodChannel, EventChannel,
+  // BinaryMessenger, …) is provided transitively by the host app
+  // once the Flutter Gradle Plugin has been applied. Declaring it
+  // here as a Maven coordinate is wrong — `io.flutter:flutter_embedding`
+  // is not a published artifact; the runtime classes ship with
+  // Flutter's own gradle integration (the `flutter.jar` bundled with
+  // the Flutter SDK). Adding a real Maven coordinate here forces
+  // Gradle to look for a non-existent version 1.0.0 on Google Maven
+  // and Maven Central, and the build fails with
+  // `Could not find io.flutter:flutter_embedding:1.0.0`.
 }
