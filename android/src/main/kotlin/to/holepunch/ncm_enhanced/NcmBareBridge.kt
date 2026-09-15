@@ -399,19 +399,29 @@ class NcmBareBridge : FlutterPlugin, ActivityAware {
     // start() that races a restart) await the same Future. After
     // completion we drop the reference but leave the cached file
     // on disk for next time.
-    val f = extractFuture ?: run {
-      if (!extractStarted.compareAndSet(false, true)) {
-        // Another caller beat us to the CAS but didn't manage to
-        // install a Future yet — spin until one is visible. In
-        // practice this is at most one extra iteration.
-        while (extractFuture == null) Thread.yield()
-        return extractFuture!!.get()
-      }
+    val existing = extractFuture
+    if (existing != null) {
+      existing.get()
+      return
+    }
+
+    // Try to install ourselves as the extractor. If we lose the CAS,
+    // wait for whoever won to install its Future and await that.
+    if (extractStarted.compareAndSet(false, true)) {
       val future = extractor.submit<Unit> { extractBridgeAssets() }
       extractFuture = future
-      future
+      future.get()
+    } else {
+      // Another caller beat us to the CAS but didn't manage to
+      // install a Future yet — spin until one is visible. In
+      // practice this is at most one extra iteration.
+      var f: java.util.concurrent.Future<Unit>? = extractFuture
+      while (f == null) {
+        Thread.yield()
+        f = extractFuture
+      }
+      f.get()
     }
-    f.get()
   }
 
   private fun extractBridgeAssets() {
