@@ -260262,6 +260262,14 @@ var require_generated_api = __commonJS({
 });
 
 // bridge.js
+console.error("=== Bare runtime ===");
+console.error("process.platform =", process.platform);
+console.error("process.arch =", process.arch);
+try {
+  console.error("require.addon.host =", require.addon.host);
+} catch (e) {
+  console.error("require.addon.host ERROR =", e.message);
+}
 var readline = require("readline");
 var isBare = typeof Bare !== "undefined" && Bare;
 var ipc = isBare ? Bare.IPC : null;

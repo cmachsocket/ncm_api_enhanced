@@ -147,6 +147,34 @@ Future<void> main(List<String> args) async {
 
     final classesJarFile = File('${pluginLibsDir.path}/bare-kit-classes.jar');
 
+    //
+    // Mirror libbare-kit.so into android/addons/<abi>/ so it ships
+    // alongside the bare-* addons prebuilt by `assets/bridge/pack.mjs`
+    // (which runs `bare-link` against every bare-* addon in the bridge
+    // module graph). The mirror goes through Android Gradle Plugin's
+    // jniLibs.srcDirs hook in android/build.gradle so every native .so
+    // reaches the APK via a single, well-defined path. bare-link does
+    // not handle libbare-kit.so because libbare-kit isn't a bare-*
+    // addon package — its prebuild ships directly from the upstream
+    // bare-kit prebuilds.zip.
+    //
+    // The hook does not assume pack.mjs has been run; it populates
+    // android/addons/<abi>/ independently. pack.mjs later appends the
+    // 100+ bare-* addons into the same directory.
+    //
+
+    final addonsAbiDir = Directory(
+      '${pluginAndroidRoot.path}/addons/$abi',
+    );
+
+    await addonsAbiDir.create(recursive: true);
+
+    final soInAddons = File('${addonsAbiDir.path}/libbare-kit.so');
+
+    if (!await soInAddons.exists()) {
+      await soFile.copy(soInAddons.path);
+    }
+
     if (!await soFile.exists() || !await classesJarFile.exists()) {
       await _extractAndroidArtifacts(
         archivePath: zipFile.path,
@@ -183,6 +211,14 @@ Future<void> main(List<String> args) async {
     // Flutter's native_assets machinery copies the .so into the host
     // app's lib/<abi>/ at build time. Kotlin code in the host app
     // can then call System.loadLibrary("bare-kit") to dlopen it.
+    //
+    // android/build.gradle also declares
+    // `sourceSets.main.jniLibs.srcDirs += "addons"` so pack.mjs's
+    // bare-link output (libbare-*.so) reaches the APK through jniLibs.
+    // libbare-kit.so itself comes from the bare-kit prebuilds.zip
+    // extracted above, not from bare-link, so we still register it
+    // through the code-asset path here. The two paths converge at
+    // `lib/<abi>/` in the final APK.
     // ---------------------------------------------------------------------
 
     output.assets.code.add(

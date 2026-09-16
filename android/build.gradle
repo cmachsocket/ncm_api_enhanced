@@ -64,7 +64,25 @@ android {
     jvmTarget = "17"
   }
 
-
+  //
+  // The bare-* native addons prebuilt by `assets/bridge/pack.mjs`
+  // (which runs `bare-link` against every bare-* addon in the bridge
+  // module graph) land in `addons/<abi>/lib<name>.<version>.so`.
+  // Exposing this directory as a jniLibs source via Android Gradle
+  // Plugin bundles the .so files into the host APK at
+  // `lib/<abi>/lib<name>.<version>.so` so that
+  // `System.loadLibrary("bare-type")` from `bare-type/binding.js`
+  // resolves at runtime.
+  //
+  // pack.mjs writes arm64-v8a, armeabi-v7a, x86_64, x86 based on the
+  // targets that `flutter build apk` walks, so all four are present
+  // after a multi-arch build.
+  //
+  sourceSets {
+    main {
+      jniLibs.srcDirs += "addons"
+    }
+  }
 }
 
 dependencies {

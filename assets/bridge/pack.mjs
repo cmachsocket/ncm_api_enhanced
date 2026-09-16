@@ -35,7 +35,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve as resolvePosix } from "node:path";
 import { createRequire } from "node:module";
 import { env, stdout, stderr, exit, platform, arch } from "node:process";
-import { stat, readFile, readdir, writeFile } from "node:fs/promises";
+import { stat, readFile, readdir, writeFile, mkdir } from "node:fs/promises";
 
 import { patchSource } from "./patch.mjs";
 
@@ -105,6 +105,25 @@ const nodeRuntimeImports = JSON.parse(
     resolvePosix(bridgeNodeModules, "bare-node-runtime/imports.json"),
     "utf8",
   ),
+);
+
+// ---------------------------------------------------------------------------
+// bare-link: extract every bare-* native addon .so referenced by the
+// module graph into android/addons/<host>/, where hook/build.dart can
+// pick them up and register them as Flutter code assets.
+//
+// On iOS and Android, bare-pack writes addon resolutions as
+// `linked:lib<name>.<version>.so` specifiers (see pack.mjs: `linked:
+// true` below). bare-link is the matching helper that turns those
+// specifiers into the actual prebuilt `.so` files baked into the
+// host APK. Without bare-link, the worklet runtime at startup would
+// hit ADDON_NOT_FOUND for every `linked:libbare-*.so` it tries to
+// load.
+//
+// ---------------------------------------------------------------------------
+
+const bareLink = bridgeRequire(
+  resolvePosix(bridgeNodeModules, "bare-link"),
 );
 
 //
@@ -388,10 +407,122 @@ stderr.write(`[pack] out:   ${outputPath}\n`);
 stderr.write(`[pack] mode:  source -> patch -> bare-pack\n`);
 
 //
-// --------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Bare pack
-// --------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 //
+// First run bare-link for every host we are targeting. bare-link
+// walks the same module graph that bare-pack is about to walk and
+// writes the prebuilt `.so` for each `bare-*` addon into a host-
+// specific subdirectory. On Android / iOS those files become the
+// targets of the `linked:lib<name>.<version>.so` specifiers that
+// bare-pack writes into the bundle (see `linked: true` below).
+//
+// We run bare-link for each host entry individually — the tool
+// accepts `--out` and treats `--host` as a multi-occurrence flag,
+// but writing each host to its own subdirectory makes the host
+// layout match what Android Gradle Plugin expects for jniLibs.
+//
+
+const androidAddonsRoot = resolvePosix(bridgeDir, "..", "..", "android", "addons");
+
+const androidHosts = HOSTS.filter((host) => host.startsWith("android-"));
+
+if (androidHosts.length > 0) {
+  // ---------------------------------------------------------------------
+  // Run bare-link for every bare-* addon we depend on.
+  //
+  // bare-link is per-package — its API takes a single package root and
+  // walks its addon prebuilds into `--out`. We can't hand it
+  // `bridgeDir` (which is not an addon package itself), so we enumerate
+  // the bare-* addons under bridgeDir/node_modules/ and call bare-link
+  // once per addon. The walk traverses transitive dependencies, so
+  // each addon we list also pulls in its own addons.
+  //
+  // ---------------------------------------------------------------------
+
+  const outDir = androidAddonsRoot;
+
+  stderr.write(`[pack] bare-link -> ${outDir} (hosts=${androidHosts.join(",")})\n`);
+
+  //
+  // bare-link walks `pkg.dependencies` (one level, no transitive
+  // recursion through arbitrary package deps), so calling it once
+  // with the bridgeDir as the entry would only see @neteasecloudmusicapienhanced/api
+  // and miss every transitive `bare-*` addon. The supported pattern
+  // is to invoke bare-link once per addon package; it then handles
+  // each addon's own deps recursively. Enumerate every addon under
+  // bridgeDir/node_modules/bare-* and bare-* (scoped) and link each.
+  //
+
+  const bridgeNodeModulesPath = resolvePosix(bridgeDir, "node_modules");
+  const bridgeNodeModulesDir = await readdir(bridgeNodeModulesPath, {
+    withFileTypes: true,
+  });
+
+  let addonCount = 0;
+
+  for (const entry of bridgeNodeModulesDir) {
+    if (!entry.isDirectory()) continue;
+
+    if (entry.name === "bare") {
+      for (const scoped of await readdir(
+        resolvePosix(bridgeNodeModulesPath, "bare"),
+        { withFileTypes: true },
+      )) {
+        if (!scoped.isDirectory()) continue;
+
+        const addonPath = resolvePosix(
+          bridgeNodeModulesPath,
+          "bare",
+          scoped.name,
+        );
+
+        const pkgJson = JSON.parse(
+          await readFile(resolvePosix(addonPath, "package.json"), "utf8"),
+        );
+
+        if (pkgJson.addon === true) {
+          for await (const resource of bareLink(addonPath, {
+            hosts: androidHosts,
+            out: outDir,
+            needs: ["libbare-kit.so"],
+          })) {
+            addonCount++;
+          }
+        }
+      }
+    } else if (entry.name.startsWith("bare-")) {
+      const addonPath = resolvePosix(bridgeNodeModulesPath, entry.name);
+
+      const pkgJson = JSON.parse(
+        await readFile(resolvePosix(addonPath, "package.json"), "utf8"),
+      );
+
+      if (pkgJson.addon === true) {
+        for await (const resource of bareLink(addonPath, {
+          hosts: androidHosts,
+          out: outDir,
+          needs: ["libbare-kit.so"],
+        })) {
+          addonCount++;
+        }
+      }
+    }
+  }
+
+  stderr.write(`[pack] bare-link processed ${addonCount} addons\n`);
+
+  //
+  // libbare-kit.so is mirrored into android/addons/<abi>/ by
+  // hook/build.dart, not here. hook has direct access to the
+  // prebuilds.zip and can extract the .so for every ABI the host
+  // app targets, while pack.mjs only sees the ABIs the user
+  // explicitly passed via HOST=. Doing it in the hook keeps the
+  // copy idempotent and tied to the same archive download that
+  // produces classes.jar.
+  //
+}
 
 let bundle;
 
@@ -451,8 +582,32 @@ try {
       //
       //   HOST=android-arm64
       //
+      // iOS:
+      //
+      //   HOST=ios-arm64
+      //
 
       hosts: HOSTS,
+
+      //
+      // On iOS and Android, native code must be linked ahead of time
+      // (typically via System.loadLibrary() / dlopen of an .so bundled
+      // into the APK). bare-pack therefore has to write addon
+      // resolutions as `linked:` URLs rather than `file:` paths to
+      // prebuilt `.bare` artifacts, because the worklet runtime inside
+      // a bare-kit Worklet cannot read from disk.
+      //
+      // bare-link (https://github.com/holepunchto/bare-link) is the
+      // matching host-side helper that wires `linked:<name>` to the
+      // actual `.so` exposed by libbare-kit. The Dart side hooks
+      // libbare-kit.so as a code asset (see hook/build.dart) and
+      // bare-link resolves `linked:bare-type` to it at runtime.
+      //
+      // Omit this on desktop paths where the .bare files are
+      // readable from disk and direct `file:` URLs work.
+      //
+
+      linked: true,
     },
 
     //
