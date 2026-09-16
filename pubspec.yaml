@@ -11,28 +11,28 @@ homepage: https://github.com/your-org/ncm_api_enhanced
 repository: https://github.com/your-org/ncm_api_enhanced
 
 environment:
-  sdk: ^3.10.0
+  sdk: ^3.12.0
   # Platform-specific assets (the `platforms:` filter under each
   # flutter.assets entry) require Flutter 3.41+. We use it to keep
   # the ~200 MB of Windows node.exe binaries out of the
   # Android / iOS / Linux / macOS release bundles.
-  flutter: ">=3.41.0"
+  flutter: 
 
 dependencies:
   flutter:
     sdk: flutter
-  bare_flutter: ^0.1.0
+  bare_flutter:
   # Hook dependencies. The Dart SDK treats anything imported from
   # hook/ as a runtime dependency, even though the hook only runs
   # at build time. None of these end up in the consumer's app binary.
-  archive: ^4.0.7
-  code_assets: ^2.0.0
-  hooks: ^2.2.0
+  archive: 
+  code_assets: 
+  hooks:
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^6.0.0
+  flutter_lints: 
 
 flutter:
   assets:
