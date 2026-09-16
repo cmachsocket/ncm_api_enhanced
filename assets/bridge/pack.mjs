@@ -14,6 +14,8 @@
 //     bridge.js
 //       -> patch.mjs
 //       -> bare-pack
+//       -> bundle.addons
+//       -> bare-link
 //       -> dist/ncm.bundle
 //
 // Do NOT feed dist/bundle.js into bare-pack.
@@ -27,6 +29,24 @@
 //
 // so that require.addon() can resolve relative to the binding.js module.
 //
+// The important build order is:
+//
+//   ORIGINAL GRAPH
+//        |
+//        v
+//   bare-pack
+//        |
+//        +---- bundle.addons
+//        |
+//        v
+//   resolve actual addon packages
+//        |
+//        v
+//   bare-link
+//        |
+//        v
+//   android/addons/
+//
 // Output:
 //   assets/bridge/dist/ncm.bundle
 //
@@ -35,7 +55,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve as resolvePosix } from "node:path";
 import { createRequire } from "node:module";
 import { env, stdout, stderr, exit, platform, arch } from "node:process";
-import { stat, readFile, readdir, writeFile, mkdir } from "node:fs/promises";
+import {
+  stat,
+  readFile,
+  readdir,
+  writeFile,
+  mkdir,
+} from "node:fs/promises";
 
 import { patchSource } from "./patch.mjs";
 
@@ -49,9 +75,15 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 
 const bridgeDir = resolvePosix(scriptDir);
 
-const bridgeNodeModules = resolvePosix(bridgeDir, "node_modules");
+const bridgeNodeModules = resolvePosix(
+  bridgeDir,
+  "node_modules",
+);
 
-const distDir = resolvePosix(bridgeDir, "dist");
+const distDir = resolvePosix(
+  bridgeDir,
+  "dist",
+);
 
 //
 // IMPORTANT:
@@ -66,64 +98,95 @@ const distDir = resolvePosix(bridgeDir, "dist");
 // Bare modules such as bare-path/binding.js lose their original referrer.
 //
 
-const entryPath = resolvePosix(bridgeDir, "bridge.js");
+const entryPath = resolvePosix(
+  bridgeDir,
+  "bridge.js",
+);
 
-const outputPath = resolvePosix(distDir, "ncm.bundle");
+const outputPath = resolvePosix(
+  distDir,
+  "ncm.bundle",
+);
 
-const esbuildBundlePath = resolvePosix(distDir, "bundle.js");
+const esbuildBundlePath = resolvePosix(
+  distDir,
+  "bundle.js",
+);
+
+//
+// Native addons linked by bare-link are written here.
+//
+// hook/build.dart can subsequently consume this directory.
+//
+const androidAddonsRoot = resolvePosix(
+  bridgeDir,
+  "..",
+  "..",
+  "android",
+  "addons",
+);
 
 //
 // createRequire() needs an actual CommonJS file path.
 //
 
-const bridgeRequire = createRequire(resolvePosix(bridgeDir, "_anchor.cjs"));
+const bridgeRequire = createRequire(
+  resolvePosix(
+    bridgeDir,
+    "_anchor.cjs",
+  ),
+);
 
 //
 // --------------------------------------------------------------------------
-// Load bare-pack
+// Load Bare tooling
 // --------------------------------------------------------------------------
 //
 
-const pack = bridgeRequire(resolvePosix(bridgeNodeModules, "bare-pack"));
+const pack = bridgeRequire(
+  resolvePosix(
+    bridgeNodeModules,
+    "bare-pack",
+  ),
+);
 
 const resolveBare = bridgeRequire(
-  resolvePosix(bridgeNodeModules, "bare-module-traverse"),
+  resolvePosix(
+    bridgeNodeModules,
+    "bare-module-traverse",
+  ),
 ).resolve;
 
+const bareLink = bridgeRequire(
+  resolvePosix(
+    bridgeNodeModules,
+    "bare-link",
+  ),
+);
+
 //
-// Node -> Bare runtime builtin mappings.
+// --------------------------------------------------------------------------
+// Node -> Bare runtime builtin mappings
+// --------------------------------------------------------------------------
 //
-// For example:
+// Examples:
 //
 //   fs       -> bare-fs
 //   path     -> bare-path
 //   crypto   -> bare-crypto
 //
+// bare-node-runtime is therefore NOT unused. Its imports.json is the
+// import map consumed by bare-pack while traversing the original graph.
+//
 
 const nodeRuntimeImports = JSON.parse(
   await readFile(
-    resolvePosix(bridgeNodeModules, "bare-node-runtime/imports.json"),
+    resolvePosix(
+      bridgeNodeModules,
+      "bare-node-runtime/imports.json",
+    ),
     "utf8",
   ),
-);
-
-// ---------------------------------------------------------------------------
-// bare-link: extract every bare-* native addon .so referenced by the
-// module graph into android/addons/<host>/, where hook/build.dart can
-// pick them up and register them as Flutter code assets.
-//
-// On iOS and Android, bare-pack writes addon resolutions as
-// `linked:lib<name>.<version>.so` specifiers (see pack.mjs: `linked:
-// true` below). bare-link is the matching helper that turns those
-// specifiers into the actual prebuilt `.so` files baked into the
-// host APK. Without bare-link, the worklet runtime at startup would
-// hit ADDON_NOT_FOUND for every `linked:libbare-*.so` it tries to
-// load.
-//
-// ---------------------------------------------------------------------------
-
-const bareLink = bridgeRequire(
-  resolvePosix(bridgeNodeModules, "bare-link"),
 );
 
 //
@@ -135,9 +198,13 @@ const bareLink = bridgeRequire(
 try {
   await stat(entryPath);
 } catch {
-  stderr.write(`[pack] missing entry: ${entryPath}\n`);
+  stderr.write(
+    `[pack] missing entry: ${entryPath}\n`,
+  );
 
-  stderr.write(`[pack] expected source entry: ${bridgeDir}/bridge.js\n`);
+  stderr.write(
+    `[pack] expected source entry: ${bridgeDir}/bridge.js\n`,
+  );
 
   exit(1);
 }
@@ -149,11 +216,16 @@ try {
 //
 
 function pathFromURL(url) {
-  return url.protocol === "file:" ? fileURLToPath(url) : null;
+  return url.protocol === "file:"
+    ? fileURLToPath(url)
+    : null;
 }
 
 function isInside(filePath, directory) {
-  return filePath === directory || filePath.startsWith(directory + "/");
+  return (
+    filePath === directory ||
+    filePath.startsWith(directory + "/")
+  );
 }
 
 function isJavaScriptFile(filePath) {
@@ -189,32 +261,7 @@ function isJavaScriptFile(filePath) {
 //
 // --------------------------------------------------------------------------
 //
-// IMPORTANT FIX:
-//
-// The previous whitelist only allowed:
-//
-//   bridge.js
-//   node_modules/**
-//   dist/**
-//
-// That caused:
-//
-//   bridge.js
-//     require("./generated_api")
-//
-// to resolve correctly to:
-//
-//   assets/bridge/generated_api.js
-//
-// but then readModule() returned null because generated_api.js was not
-// whitelisted.
-//
-// bare-module-traverse interprets readModule() === null as "module not
-// found", resulting in:
-//
-//   MODULE_NOT_FOUND: Cannot find module './generated_api'
-//
-// Therefore all ORIGINAL source files under bridgeDir must be readable.
+// All ORIGINAL source files under bridgeDir must be readable.
 //
 // dist/bundle.js is explicitly excluded because it is an esbuild artifact,
 // not part of the original module graph.
@@ -230,6 +277,7 @@ async function readModule(url) {
   //
   // Only allow files inside the bridge source tree.
   //
+
   if (!isInside(filePath, bridgeDir)) {
     return null;
   }
@@ -237,6 +285,7 @@ async function readModule(url) {
   //
   // Never consume esbuild's generated bundle.
   //
+
   if (filePath === esbuildBundlePath) {
     return null;
   }
@@ -244,6 +293,7 @@ async function readModule(url) {
   //
   // Never consume the Bare bundle currently being generated.
   //
+
   if (filePath === outputPath) {
     return null;
   }
@@ -251,7 +301,10 @@ async function readModule(url) {
   let source;
 
   try {
-    source = await readFile(filePath, "utf8");
+    source = await readFile(
+      filePath,
+      "utf8",
+    );
   } catch (error) {
     //
     // bare-module-traverse probes multiple candidates.
@@ -261,32 +314,27 @@ async function readModule(url) {
     //   ./generated_api
     //   ./generated_api.js
     //
-    // and:
-    //
     //   ./util
     //   ./util.js
     //   ./util/index.js
     //
-    // A candidate can therefore fail because:
-    //
-    //   ENOENT -> path does not exist
-    //   EISDIR -> path exists but is a directory
-    //
-    // Both mean that this particular candidate is not a readable module.
-    // Return null so bare-module-traverse can continue resolving.
+    // ENOENT/EISDIR simply mean this candidate is not a readable module.
     //
 
-    if (error?.code === "ENOENT" || error?.code === "EISDIR") {
+    if (
+      error?.code === "ENOENT" ||
+      error?.code === "EISDIR"
+    ) {
       return null;
     }
 
-    //
-    // Other filesystem errors are real errors.
-    //
+    stderr.write(
+      `[pack] readModule failed: ${filePath}\n`,
+    );
 
-    stderr.write(`[pack] readModule failed: ${filePath}\n`);
-
-    stderr.write(`${error?.stack || error}\n`);
+    stderr.write(
+      `${error?.stack || error}\n`,
+    );
 
     throw error;
   }
@@ -296,18 +344,28 @@ async function readModule(url) {
   //
 
   if (!isJavaScriptFile(filePath)) {
-    return Buffer.from(source, "utf8");
+    return Buffer.from(
+      source,
+      "utf8",
+    );
   }
 
   //
-  // Apply Bare-specific patches.
+  // Apply Bare-specific source patches.
   //
 
-  const patched = patchSource(filePath, source, {
-    target: "bare",
-  });
+  const patched = patchSource(
+    filePath,
+    source,
+    {
+      target: "bare",
+    },
+  );
 
-  return Buffer.from(patched, "utf8");
+  return Buffer.from(
+    patched,
+    "utf8",
+  );
 }
 
 //
@@ -319,8 +377,8 @@ async function readModule(url) {
 //
 // We only expose dist/ as an asset tree.
 //
-// node_modules are NOT recursively enumerated here because modules should
-// be resolved through bare-module-traverse.
+// node_modules are NOT recursively enumerated here because modules are
+// resolved through bare-module-traverse.
 //
 
 async function* listPrefix(url) {
@@ -341,15 +399,21 @@ async function* listPrefix(url) {
   let entries;
 
   try {
-    entries = await readdir(dir, {
-      withFileTypes: true,
-    });
+    entries = await readdir(
+      dir,
+      {
+        withFileTypes: true,
+      },
+    );
   } catch {
     return;
   }
 
   for (const entry of entries) {
-    const child = resolvePosix(dir, entry.name);
+    const child = resolvePosix(
+      dir,
+      entry.name,
+    );
 
     yield pathToFileURL(child);
 
@@ -368,15 +432,23 @@ async function* listPrefix(url) {
     let children;
 
     try {
-      children = await readdir(child, {
-        withFileTypes: true,
-      });
+      children = await readdir(
+        child,
+        {
+          withFileTypes: true,
+        },
+      );
     } catch {
       continue;
     }
 
     for (const grandchild of children) {
-      yield pathToFileURL(resolvePosix(child, grandchild.name));
+      yield pathToFileURL(
+        resolvePosix(
+          child,
+          grandchild.name,
+        ),
+      );
     }
   }
 }
@@ -387,10 +459,17 @@ async function* listPrefix(url) {
 // --------------------------------------------------------------------------
 //
 
-const HOSTS = (env.HOST ?? `${platform}-${arch}`)
+const HOSTS = (
+  env.HOST ??
+  `${platform}-${arch}`
+)
   .split(",")
   .map((host) => host.trim())
   .filter(Boolean);
+
+const androidHosts = HOSTS.filter(
+  (host) => host.startsWith("android-"),
+);
 
 //
 // --------------------------------------------------------------------------
@@ -398,131 +477,39 @@ const HOSTS = (env.HOST ?? `${platform}-${arch}`)
 // --------------------------------------------------------------------------
 //
 
-stderr.write(`[pack] entry: ${entryPath}\n`);
+stderr.write(
+  `[pack] entry: ${entryPath}\n`,
+);
 
-stderr.write(`[pack] hosts: ${HOSTS.join(", ")}\n`);
+stderr.write(
+  `[pack] hosts: ${HOSTS.join(", ")}\n`,
+);
 
-stderr.write(`[pack] out:   ${outputPath}\n`);
+stderr.write(
+  `[pack] out:   ${outputPath}\n`,
+);
 
-stderr.write(`[pack] mode:  source -> patch -> bare-pack\n`);
+stderr.write(
+  `[pack] mode:  source -> patch -> bare-pack -> bare-link\n`,
+);
 
 //
-// ---------------------------------------------------------------------------
-// Bare pack
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
+// Pack
+// --------------------------------------------------------------------------
 //
-// First run bare-link for every host we are targeting. bare-link
-// walks the same module graph that bare-pack is about to walk and
-// writes the prebuilt `.so` for each `bare-*` addon into a host-
-// specific subdirectory. On Android / iOS those files become the
-// targets of the `linked:lib<name>.<version>.so` specifiers that
-// bare-pack writes into the bundle (see `linked: true` below).
+// IMPORTANT:
 //
-// We run bare-link for each host entry individually — the tool
-// accepts `--out` and treats `--host` as a multi-occurrence flag,
-// but writing each host to its own subdirectory makes the host
-// layout match what Android Gradle Plugin expects for jniLibs.
+// bare-pack runs FIRST.
 //
-
-const androidAddonsRoot = resolvePosix(bridgeDir, "..", "..", "android", "addons");
-
-const androidHosts = HOSTS.filter((host) => host.startsWith("android-"));
-
-if (androidHosts.length > 0) {
-  // ---------------------------------------------------------------------
-  // Run bare-link for every bare-* addon we depend on.
-  //
-  // bare-link is per-package — its API takes a single package root and
-  // walks its addon prebuilds into `--out`. We can't hand it
-  // `bridgeDir` (which is not an addon package itself), so we enumerate
-  // the bare-* addons under bridgeDir/node_modules/ and call bare-link
-  // once per addon. The walk traverses transitive dependencies, so
-  // each addon we list also pulls in its own addons.
-  //
-  // ---------------------------------------------------------------------
-
-  const outDir = androidAddonsRoot;
-
-  stderr.write(`[pack] bare-link -> ${outDir} (hosts=${androidHosts.join(",")})\n`);
-
-  //
-  // bare-link walks `pkg.dependencies` (one level, no transitive
-  // recursion through arbitrary package deps), so calling it once
-  // with the bridgeDir as the entry would only see @neteasecloudmusicapienhanced/api
-  // and miss every transitive `bare-*` addon. The supported pattern
-  // is to invoke bare-link once per addon package; it then handles
-  // each addon's own deps recursively. Enumerate every addon under
-  // bridgeDir/node_modules/bare-* and bare-* (scoped) and link each.
-  //
-
-  const bridgeNodeModulesPath = resolvePosix(bridgeDir, "node_modules");
-  const bridgeNodeModulesDir = await readdir(bridgeNodeModulesPath, {
-    withFileTypes: true,
-  });
-
-  let addonCount = 0;
-
-  for (const entry of bridgeNodeModulesDir) {
-    if (!entry.isDirectory()) continue;
-
-    if (entry.name === "bare") {
-      for (const scoped of await readdir(
-        resolvePosix(bridgeNodeModulesPath, "bare"),
-        { withFileTypes: true },
-      )) {
-        if (!scoped.isDirectory()) continue;
-
-        const addonPath = resolvePosix(
-          bridgeNodeModulesPath,
-          "bare",
-          scoped.name,
-        );
-
-        const pkgJson = JSON.parse(
-          await readFile(resolvePosix(addonPath, "package.json"), "utf8"),
-        );
-
-        if (pkgJson.addon === true) {
-          for await (const resource of bareLink(addonPath, {
-            hosts: androidHosts,
-            out: outDir,
-            needs: ["libbare-kit.so"],
-          })) {
-            addonCount++;
-          }
-        }
-      }
-    } else if (entry.name.startsWith("bare-")) {
-      const addonPath = resolvePosix(bridgeNodeModulesPath, entry.name);
-
-      const pkgJson = JSON.parse(
-        await readFile(resolvePosix(addonPath, "package.json"), "utf8"),
-      );
-
-      if (pkgJson.addon === true) {
-        for await (const resource of bareLink(addonPath, {
-          hosts: androidHosts,
-          out: outDir,
-          needs: ["libbare-kit.so"],
-        })) {
-          addonCount++;
-        }
-      }
-    }
-  }
-
-  stderr.write(`[pack] bare-link processed ${addonCount} addons\n`);
-
-  //
-  // libbare-kit.so is mirrored into android/addons/<abi>/ by
-  // hook/build.dart, not here. hook has direct access to the
-  // prebuilds.zip and can extract the .so for every ABI the host
-  // app targets, while pack.mjs only sees the ABIs the user
-  // explicitly passed via HOST=. Doing it in the hook keeps the
-  // copy idempotent and tied to the same archive download that
-  // produces classes.jar.
-  //
-}
+// It traverses the actual module graph and determines the exact native
+// addon URLs that belong to this bundle.
+//
+// We intentionally do NOT scan all node_modules/bare-* packages before
+// packing.
+//
+// bundle.addons is the source of truth.
+//
 
 let bundle;
 
@@ -538,7 +525,9 @@ try {
       // This allows the bundle to retain the original module structure.
       //
 
-      base: pathToFileURL(bridgeDir),
+      base: pathToFileURL(
+        bridgeDir,
+      ),
 
       //
       // Node -> Bare builtin redirects.
@@ -553,58 +542,35 @@ try {
       resolve: resolveBare.bare,
 
       //
-      // Conditions:
-      //
-      // music-metadata v11+ is pure ESM and only exposes its entry via
-      // 'module-sync' / 'import' in package.json#exports. Worse, its
-      // exports map is wrapped under the 'node' condition:
-      //
-      //   {
-      //     "node": { "module-sync": "./lib/index.js", ... },
-      //     "default": { "module-sync": "./lib/core.js",  ... }
-      //   }
-      //
-      // bare-pack does NOT implicitly enable the 'node' condition, so we
-      // must opt in explicitly. Mirrors build.mjs so both pipelines
-      // resolve identically.
+      // music-metadata v11+ is pure ESM and uses the node/module-sync
+      // conditions in its exports map.
       //
 
-      conditions: ['node', 'module-sync'],
+      conditions: [
+        "node",
+        "module-sync",
+      ],
 
       //
       // Native addon target.
       //
-      // Default:
-      //
-      //   linux-x64
-      //
-      // Android:
+      // Examples:
       //
       //   HOST=android-arm64
-      //
-      // iOS:
-      //
+      //   HOST=android-arm64,android-x64
       //   HOST=ios-arm64
       //
 
       hosts: HOSTS,
 
       //
-      // On iOS and Android, native code must be linked ahead of time
-      // (typically via System.loadLibrary() / dlopen of an .so bundled
-      // into the APK). bare-pack therefore has to write addon
-      // resolutions as `linked:` URLs rather than `file:` paths to
-      // prebuilt `.bare` artifacts, because the worklet runtime inside
-      // a bare-kit Worklet cannot read from disk.
+      // Mobile runtimes link native addons ahead of time.
       //
-      // bare-link (https://github.com/holepunchto/bare-link) is the
-      // matching host-side helper that wires `linked:<name>` to the
-      // actual `.so` exposed by libbare-kit. The Dart side hooks
-      // libbare-kit.so as a code asset (see hook/build.dart) and
-      // bare-link resolves `linked:bare-type` to it at runtime.
+      // Therefore addon resolutions must use:
       //
-      // Omit this on desktop paths where the .bare files are
-      // readable from disk and direct `file:` URLs work.
+      //   linked:
+      //
+      // rather than runtime-loadable file: URLs.
       //
 
       linked: true,
@@ -623,9 +589,562 @@ try {
     listPrefix,
   );
 } catch (error) {
-  stderr.write("\n[pack] bare-pack failed\n");
+  stderr.write(
+    "\n[pack] bare-pack failed\n",
+  );
 
-  stderr.write(`${error?.stack || error}\n`);
+  stderr.write(
+    `${error?.stack || error}\n`,
+  );
+
+  exit(1);
+}
+
+//
+// --------------------------------------------------------------------------
+// Pack diagnostics
+// --------------------------------------------------------------------------
+//
+
+const bundledAddons = Array.isArray(
+  bundle?.addons,
+)
+  ? bundle.addons
+  : [];
+
+const bundledAssets = Array.isArray(
+  bundle?.assets,
+)
+  ? bundle.assets
+  : [];
+
+stdout.write(
+  `\n[pack] bare-pack discovered ${bundledAddons.length} native addon(s)\n`,
+);
+
+if (bundledAddons.length > 0) {
+  stdout.write(
+    "\n[pack] bundle.addons:\n",
+  );
+
+  for (const addon of bundledAddons) {
+    stdout.write(
+      `  ${addon}\n`,
+    );
+  }
+}
+
+if (bundledAssets.length > 0) {
+  stdout.write(
+    "\n[pack] bundle.assets:\n",
+  );
+
+  for (const asset of bundledAssets) {
+    stdout.write(
+      `  ${asset}\n`,
+    );
+  }
+}
+
+//
+// --------------------------------------------------------------------------
+// Addon package discovery
+// --------------------------------------------------------------------------
+//
+// bundle.addons contains RESOLVED addon URLs, for example:
+//
+//   linked:libbare-type.1.1.1.so
+//
+// bare-link, however, operates on an addon PACKAGE ROOT.
+//
+// Therefore we build a small index of addon packages:
+//
+//   linked URL
+//        |
+//        v
+//   package.json
+//        |
+//        v
+//   package root
+//
+// IMPORTANT:
+//
+// We do NOT use this index to decide which addons are needed.
+//
+// bare-pack has already made that decision.
+//
+// The index is only used to map the addons discovered by bare-pack back
+// to their package roots for bare-link.
+//
+
+async function readPackageJson(packagePath) {
+  try {
+    return JSON.parse(
+      await readFile(
+        resolvePosix(
+          packagePath,
+          "package.json",
+        ),
+        "utf8",
+      ),
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function collectAddonPackages() {
+  const result = [];
+
+  let entries;
+
+  try {
+    entries = await readdir(
+      bridgeNodeModules,
+      {
+        withFileTypes: true,
+      },
+    );
+  } catch (error) {
+    stderr.write(
+      `[pack] failed to read node_modules: ${error?.stack || error}\n`,
+    );
+
+    throw error;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    //
+    // Handle:
+    //
+    //   node_modules/bare-*
+    //
+    // and:
+    //
+    //   node_modules/bare/*
+    //
+
+    if (entry.name === "bare") {
+      const scopedRoot = resolvePosix(
+        bridgeNodeModules,
+        "bare",
+      );
+
+      let scopedEntries;
+
+      try {
+        scopedEntries = await readdir(
+          scopedRoot,
+          {
+            withFileTypes: true,
+          },
+        );
+      } catch {
+        continue;
+      }
+
+      for (const scoped of scopedEntries) {
+        if (!scoped.isDirectory()) {
+          continue;
+        }
+
+        const packagePath = resolvePosix(
+          scopedRoot,
+          scoped.name,
+        );
+
+        const packageJson = await readPackageJson(
+          packagePath,
+        );
+
+        if (
+          packageJson?.addon === true
+        ) {
+          result.push({
+            path: packagePath,
+            name: packageJson.name,
+            version: packageJson.version,
+          });
+        }
+      }
+
+      continue;
+    }
+
+    if (!entry.name.startsWith("bare-")) {
+      continue;
+    }
+
+    const packagePath = resolvePosix(
+      bridgeNodeModules,
+      entry.name,
+    );
+
+    const packageJson = await readPackageJson(
+      packagePath,
+    );
+
+    if (
+      packageJson?.addon === true
+    ) {
+      result.push({
+        path: packagePath,
+        name: packageJson.name,
+        version: packageJson.version,
+      });
+    }
+  }
+
+  return result;
+}
+
+//
+// --------------------------------------------------------------------------
+// Match bare-pack addon URL -> addon package
+// --------------------------------------------------------------------------
+//
+// For Android/Linux-style linked addons, bare-pack produces:
+//
+//   linked:lib<package-name>.<version>.so
+//
+// Example:
+//
+//   bare-type@1.1.1
+//
+// becomes:
+//
+//   linked:libbare-type.1.1.1.so
+//
+// We therefore derive the expected linked filename from package metadata
+// instead of guessing from arbitrary node_modules directory names.
+//
+
+function getLinkedAddonBasename(
+  packageJson,
+) {
+  if (
+    !packageJson?.name ||
+    !packageJson?.version
+  ) {
+    return null;
+  }
+
+  //
+  // bare-pack's Android/Linux linked addon convention:
+  //
+  //   lib<name>.<version>.so
+  //
+  //
+
+  return `lib${packageJson.name}.${packageJson.version}.so`;
+}
+
+function normalizeAddonHref(href) {
+  if (
+    typeof href !== "string"
+  ) {
+    return null;
+  }
+
+  //
+  // The bundle may contain:
+  //
+  //   linked:libbare-type.1.1.1.so
+  //
+  // but for matching we only need the URL path/basename.
+  //
+
+  if (
+    href.startsWith("linked:")
+  ) {
+    return href.slice(
+      "linked:".length,
+    );
+  }
+
+  return href;
+}
+
+async function resolveAddonPackages(
+  addons,
+) {
+  const packages = await collectAddonPackages();
+
+  const packageByLinkedBasename =
+    new Map();
+
+  for (const pkg of packages) {
+    const packageJson = await readPackageJson(
+      pkg.path,
+    );
+
+    const basename =
+      getLinkedAddonBasename(
+        packageJson,
+      );
+
+    if (!basename) {
+      continue;
+    }
+
+    packageByLinkedBasename.set(
+      basename,
+      {
+        ...pkg,
+        packageJson,
+      },
+    );
+  }
+
+  const resolved = [];
+  const unresolved = [];
+
+  for (const addon of addons) {
+    const normalized =
+      normalizeAddonHref(addon);
+
+    //
+    // We only need package mapping for actual linked addons.
+    //
+
+    if (
+      !normalized ||
+      !normalized.startsWith("lib") ||
+      !normalized.endsWith(".so")
+    ) {
+      continue;
+    }
+
+    const pkg =
+      packageByLinkedBasename.get(
+        normalized,
+      );
+
+    if (!pkg) {
+      unresolved.push(addon);
+      continue;
+    }
+
+    resolved.push({
+      addon,
+      ...pkg,
+    });
+  }
+
+  return {
+    resolved,
+    unresolved,
+  };
+}
+
+//
+// --------------------------------------------------------------------------
+// Link addons
+// --------------------------------------------------------------------------
+//
+// This is the SECOND stage.
+//
+// bare-pack has already told us which native addons are actually required.
+//
+// bare-link is now responsible only for materializing those packages into:
+//
+//   android/addons/
+//
+// This keeps pack.mjs as the unified pack + link entry point while making
+// bare-pack the source of truth for addon reachability.
+//
+
+async function linkBundleAddons() {
+  if (androidHosts.length === 0) {
+    stderr.write(
+      "\n[pack] no Android hosts requested; skipping bare-link\n",
+    );
+
+    return;
+  }
+
+  if (bundledAddons.length === 0) {
+    stderr.write(
+      "\n[pack] bundle contains no native addons; skipping bare-link\n",
+    );
+
+    return;
+  }
+
+  //
+  // Only linked Android/Linux .so addons are handled here.
+  //
+
+  const linkedAddons =
+    bundledAddons.filter(
+      (addon) =>
+        typeof addon === "string" &&
+        addon.startsWith("linked:") &&
+        addon.endsWith(".so"),
+    );
+
+  if (linkedAddons.length === 0) {
+    stderr.write(
+      "\n[pack] bundle has no linked Android .so addons; skipping bare-link\n",
+    );
+
+    return;
+  }
+
+  //
+  // Ensure destination exists.
+  //
+
+  await mkdir(
+    androidAddonsRoot,
+    {
+      recursive: true,
+    },
+  );
+
+  stderr.write(
+    `\n[pack] bare-link -> ${androidAddonsRoot}\n`,
+  );
+
+  stderr.write(
+    `[pack] Android hosts: ${androidHosts.join(", ")}\n`,
+  );
+
+  stderr.write(
+    `[pack] linking ${linkedAddons.length} bundle addon(s)\n`,
+  );
+
+  //
+  // Map bundle.addons back to addon packages.
+  //
+
+  const {
+    resolved,
+    unresolved,
+  } = await resolveAddonPackages(
+    linkedAddons,
+  );
+
+  //
+  // Report anything bare-pack requested that we cannot map.
+  //
+
+  if (unresolved.length > 0) {
+    stderr.write(
+      "\n[pack] WARNING: unable to map these bundle addons to local addon packages:\n",
+    );
+
+    for (const addon of unresolved) {
+      stderr.write(
+        `  ${addon}\n`,
+      );
+    }
+
+    //
+    // Do NOT silently link every bare-* package as a fallback.
+    //
+    // If bare-pack says an addon is required but our package index cannot
+    // resolve it, failing here is safer than producing a bundle that
+    // appears complete but crashes later with ADDON_NOT_FOUND.
+    //
+
+    throw new Error(
+      `Unable to resolve ${unresolved.length} bundled native addon(s) to local addon packages`,
+    );
+  }
+
+  //
+  // Deduplicate packages.
+  //
+
+  const uniquePackages =
+    new Map();
+
+  for (const pkg of resolved) {
+    const key = `${pkg.name}@${pkg.version}`;
+
+    if (!uniquePackages.has(key)) {
+      uniquePackages.set(
+        key,
+        pkg,
+      );
+    }
+  }
+
+  let linkedResourceCount = 0;
+
+  for (const pkg of uniquePackages.values()) {
+    stderr.write(
+      `[pack] link ${pkg.name}@${pkg.version}\n`,
+    );
+
+    for await (
+      const resource of bareLink(
+        pkg.path,
+        {
+          hosts: androidHosts,
+          out: androidAddonsRoot,
+
+          //
+          // bare-kit itself is supplied separately by the Flutter build
+          // hook, so native addon linking only needs to resolve resources
+          // against libbare-kit.so.
+          //
+
+          needs: [
+            "libbare-kit.so",
+          ],
+        },
+      )
+    ) {
+      linkedResourceCount++;
+
+      //
+      // Keep the resource object available for diagnostics without
+      // depending on its exact shape.
+      //
+
+      if (env.DEBUG_BARE_LINK === "1") {
+        stdout.write(
+          `[pack] linked resource: ${String(resource)}\n`,
+        );
+      }
+    }
+  }
+
+  stdout.write(
+    `\n[pack] bare-link linked ${uniquePackages.size} addon package(s), ${linkedResourceCount} resource(s)\n`,
+  );
+
+  //
+  // libbare-kit.so is intentionally NOT copied here.
+  //
+  // hook/build.dart owns libbare-kit.so because it already has access to
+  // the bare-kit prebuild archive and knows which Flutter code assets /
+  // Android ABIs the application is actually building.
+  //
+}
+
+//
+// --------------------------------------------------------------------------
+// Link stage
+// --------------------------------------------------------------------------
+//
+
+try {
+  await linkBundleAddons();
+} catch (error) {
+  stderr.write(
+    "\n[pack] bare-link failed\n",
+  );
+
+  stderr.write(
+    `${error?.stack || error}\n`,
+  );
 
   exit(1);
 }
@@ -635,31 +1154,82 @@ try {
 // Write bundle
 // --------------------------------------------------------------------------
 //
+//
+// IMPORTANT:
+//
+// bare-pack has already finalized:
+//
+//   bundle.resolutions
+//   bundle.addons
+//   bundle.assets
+//
+// bare-link does NOT modify the bundle itself.
+//
+// It materializes the native libraries that those `linked:` resolutions
+// expect to find in the host application.
+//
 
 const data = bundle.toBuffer();
 
-await writeFile(outputPath, data);
+await writeFile(
+  outputPath,
+  data,
+);
 
-stdout.write(`[pack] wrote ${outputPath} (${data.byteLength} bytes)\n`);
+stdout.write(
+  `\n[pack] wrote ${outputPath} (${data.byteLength} bytes)\n`,
+);
 
 //
 // --------------------------------------------------------------------------
-// Diagnostics
+// Final diagnostics
 // --------------------------------------------------------------------------
 //
 
-if (bundle.addons?.length) {
-  stdout.write("\n[pack] embedded native addons:\n");
+stdout.write(
+  `\n[pack] summary:\n`,
+);
 
-  for (const addon of bundle.addons) {
-    stdout.write(`  ${addon}\n`);
+stdout.write(
+  `  entry:  ${entryPath}\n`,
+);
+
+stdout.write(
+  `  output: ${outputPath}\n`,
+);
+
+stdout.write(
+  `  hosts:  ${HOSTS.join(", ")}\n`,
+);
+
+stdout.write(
+  `  addons: ${bundledAddons.length}\n`,
+);
+
+stdout.write(
+  `  assets: ${bundledAssets.length}\n`,
+);
+
+if (bundledAddons.length > 0) {
+  stdout.write(
+    "\n[pack] embedded native addons:\n",
+  );
+
+  for (const addon of bundledAddons) {
+    stdout.write(
+      `  ${addon}\n`,
+    );
   }
 }
 
-if (bundle.assets?.length) {
-  stdout.write("\n[pack] bundled assets:\n");
+if (bundledAssets.length > 0) {
+  stdout.write(
+    "\n[pack] bundled assets:\n",
+  );
 
-  for (const asset of bundle.assets) {
-    stdout.write(`  ${asset}\n`);
+  for (const asset of bundledAssets) {
+    stdout.write(
+      `  ${asset}\n`,
+    );
   }
 }

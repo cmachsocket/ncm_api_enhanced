@@ -11,8 +11,8 @@
   "devDependencies": {
     "bare-link": "^3.3.0",
     "bare-module-traverse": "^2.5.5",
-    "bare-node-runtime": "^1.5.0",
-    "bare-pack": "^1.5.1",
+    "bare-node-runtime": "^1.5.1",
+    "bare-pack": "^2.2.2",
     "bare-run": "^0.0.3",
     "esbuild": "^0.28.2"
   },
