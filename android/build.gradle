@@ -444,7 +444,7 @@ tasks.named("assemble") {
 
 kotlin {
     compilerOptions {
-        jvmTarget = JavaVersion.VERSION_17
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 
