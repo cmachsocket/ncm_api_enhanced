@@ -238,7 +238,7 @@ class MobileNcmBridge implements NcmBridge {
       final worklet = await BareWorklet.start(
         filename: '/ncm.bundle',
         source: source,
-        options: BareWorkletOptions(memoryLimitBytes: 24 * 1024 * 1024),
+        options: BareWorkletOptions(memoryLimitBytes: 256 * 1024 * 1024),
       );
 
       _worklet = worklet;
