@@ -1,10 +1,10 @@
 name: ncm_api_enhanced
-description: >
-  Unofficial Netease Cloud Music API for Flutter, backed by an embedded
-  nodejs-mobile v18.20.4 runtime. Exposes all 439 upstream module
-  functions as a Dart facade; runs on Linux/macOS/Windows (via the
-  system `node` binary), Android (via libnode.so loaded by JNI), and
-  iOS (via NodeMobile.xcframework embedded in the .app bundle).
+description: >-
+  Unofficial Netease Cloud Music API as a Flutter package. Embeds a
+  Bare runtime on Android and iOS via bare_flutter
+  (https://pub.dev/packages/bare_flutter) and exposes the upstream
+  `@neteasecloudmusicapienhanced/api` package's 439 module functions
+  as a Dart facade.
 version: 0.1.0
 publish_to: none
 homepage: https://github.com/your-org/ncm_api_enhanced
@@ -21,23 +21,18 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  # Packages used in hook/build.dart. The Dart SDK treats anything
-  # imported from hook/ as a runtime dependency, not a dev dependency,
-  # even though the hook only runs at build time. These are not
-  # shipped in the consumer's app binary — they're only resolved by
-  # the host that runs `flutter pub get` / `dart pub get`.
+  bare_flutter: ^0.1.0
+  # Hook dependencies. The Dart SDK treats anything imported from
+  # hook/ as a runtime dependency, even though the hook only runs
+  # at build time. None of these end up in the consumer's app binary.
   archive: ^4.0.7
   code_assets: ^2.0.0
   hooks: ^2.2.0
-  http: ^1.5.0
-  native_toolchain_c: ^0.19.4
-  ffi:
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-  asset_fill: 
 
 flutter:
   assets:
@@ -56,44 +51,37 @@ flutter:
       platforms:
         - android
         - ios
-      
-      
     - assets/bridge/dist/data/
     # Windows desktop node runtime.
     #
     # We ship a standalone node.exe alongside the bundle so end
-    # users don't need to install Node themselves. x64 + arm64 —
-    # the bridge picks at runtime based on PROCESSOR_ARCHITECTURE.
+    # users don't need to install Node themselves. x64 + arm64 — the
+    # bridge picks at runtime based on PROCESSOR_ARCHITECTURE.
     # Cost: ~99 MB (x64) + ~87 MB (arm64) = ~186 MB extra in the
-    # Windows release. Acceptable because the alternative is
-    # requiring Windows users to install Node 22+ manually.
+    # Windows release. Acceptable because the alternative is requiring
+    # Windows users to install Node 22+ manually.
     #
     # The `platforms: [windows]` filter keeps these binaries out of
-    # every non-Windows consumer release. Without it the Android
-    # APK / iOS IPA / Linux snap / macOS .app all carry the Windows
-    # runtime they will never need. The filter requires Flutter
-    # 3.41+ (see environment.flutter constraint above); older SDKs
-    # silently ignore the filter and bundle everywhere.
+    # every non-Windows consumer release. Without it the Android APK /
+    # iOS IPA / Linux snap / macOS .app all carry the Windows runtime
+    # they will never need. The filter requires Flutter 3.41+ (see
+    # environment.flutter constraint above); older SDKs silently
+    # ignore the filter and bundle everywhere.
     #
     # Note: pub publish still ships the binaries in the plugin
-    # tarball regardless of `platforms:` — Flutter only consults
-    # this filter at consumer build time, not at package publish.
-    # That is intentional here: the file *must* be present on
-    # disk so Flutter can locate it at Windows build time.
+    # tarball regardless of `platforms:` — Flutter only consults this
+    # filter at consumer build time, not at package publish. That is
+    # intentional here: the file *must* be present on disk so Flutter
+    # can locate it at Windows build time.
     - path: assets/runtime/win-x64/node.exe
       platforms:
         - windows
     - path: assets/runtime/win-arm64/node.exe
       platforms:
         - windows
-  plugin:
-    platforms:
-
-      android:
-        package: to.holepunch.ncm_enhanced
-        pluginClass: NcmBareBridge
-      ios:
-        pluginClass: NcmNodeBridge
-      # Desktop (Linux/macOS/Windows) is pure Dart — it spawns the
-      # system `node` binary via Process. No plugin registration
-      # needed; NcmBridgeFactory picks DesktopNcmBridge automatically.
+  # bare_flutter provides the Android and iOS platform
+  # implementations of this package. Both sides declare their own
+  # pluginClass (BareFlutterPlugin); we don't redeclare them here.
+  # Android/iOS apps get bare-kit worklet hosting for free through
+  # bare_flutter; desktop platforms ignore the plugin and spawn the
+  # system `node` binary via Process in lib/src/desktop_bridge.dart.
