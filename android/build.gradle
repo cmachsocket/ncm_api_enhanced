@@ -5,23 +5,33 @@
 // Responsibilities
 // ----------------
 //
-// This Gradle file is intentionally kept thin.
+// This module ONLY consumes pre-generated Bare addon JARs.
 //
-// Native Bare addon build:
+// Pre-build preparation:
 //
 //   pack.mjs
 //       |
+//       +-- bare-pack
 //       +-- bare-link
 //       |
 //       v
 //   android/addons/<abi>/*.so
-//
-// JAR packaging:
-//
+//       |
+//       v
 //   package-addons.mjs
 //       |
 //       v
 //   android/addons-jars/<abi>.jar
+//
+// Android build:
+//
+//   android/addons-jars/*.jar
+//       |
+//       v
+//   Gradle dependency
+//       |
+//       v
+//   AAR / APK
 //
 // Bare runtime:
 //
@@ -29,21 +39,37 @@
 //       |
 //       +-- libbare-kit.so
 //       +-- Bare Java/Kotlin API
-//
-// This module only orchestrates the two Node scripts and exposes the
-// generated JARs to the Android build.
+//       +-- Worklet runtime
 //
 // IMPORTANT:
 //
-//   libbare-kit.so is NOT one of the addon JARs.
+//   This Gradle file does NOT:
+//     - run Node
+//     - run pack.mjs
+//     - run bare-pack
+//     - run bare-link
+//     - run package-addons.mjs
+//     - generate .so files
+//     - generate JARs
+//     - download Bare addons
+//     - provide libbare-kit.so
 //
-//   bare_flutter owns bare-kit itself.
+// The addon JARs must already exist when this Android plugin is built.
 //
-//   The JARs generated here contain only:
+// Expected files:
 //
-//       lib/<abi>/libbare-*.so
+//   android/addons-jars/
+//       arm64-v8a.jar
+//       armeabi-v7a.jar
+//       x86_64.jar
+//       x86.jar
 //
-// ---------------------------------------------------------------------------
+// Each JAR contains:
+//
+//   lib/<abi>/libbare-*.so
+//
+// libbare-kit.so is owned entirely by bare_flutter.
+//
 
 plugins {
     id "com.android.library"
@@ -74,283 +100,94 @@ android {
 
 //
 // --------------------------------------------------------------------------
-// ABI matrix
+// Pre-generated Bare addon JARs
+// --------------------------------------------------------------------------
+//
+// These files are part of the package and MUST already exist.
+//
+// Do not generate them from Gradle.
+//
 // --------------------------------------------------------------------------
 //
 
-ext.targetAbis = [
-    "arm64-v8a",
-    "armeabi-v7a",
-    "x86_64",
-    "x86"
-]
-
-//
-// Bare host names corresponding to Android ABIs.
-//
-
-ext.hostBin = [
-    "arm64-v8a"  : "android-arm64",
-    "armeabi-v7a": "android-arm",
-    "x86_64"     : "android-x64",
-    "x86"        : "android-ia32",
-]
-
-//
-// --------------------------------------------------------------------------
-// Paths
-// --------------------------------------------------------------------------
-//
-
-ext.bridgeDir = file(
-    "${projectDir}/../assets/bridge"
-).absolutePath
-
-ext.packScript = file(
-    "${bridgeDir}/pack.mjs"
-).absolutePath
-
-ext.packageAddonsScript = file(
-    "${bridgeDir}/package-addons.mjs"
-).absolutePath
-
-ext.addonsDir = file(
-    "${projectDir}/addons"
-).absolutePath
-
-ext.addonsJarsDir = file(
+def addonsJarsDir = file(
     "${projectDir}/addons-jars"
-).absolutePath
+)
+
+def addonJarNames = [
+    "arm64-v8a.jar",
+    "armeabi-v7a.jar",
+    "x86_64.jar",
+    "x86.jar",
+]
 
 //
 // --------------------------------------------------------------------------
-// Node executable
-// --------------------------------------------------------------------------
-//
-// Flutter does not ship Node.
-//
-// Default:
-//
-//     node
-//
-// Override:
-//
-//     NCM_NODE=/absolute/path/to/node
-//
+// Validate pre-generated artifacts
 // --------------------------------------------------------------------------
 //
 
-ext.ncmNodePath = {
-    def configured = System.getenv("NCM_NODE")
-
-    if (configured != null && !configured.trim().isEmpty()) {
-        return configured.trim()
-    }
-
-    return "node"
-}
-
-//
-// --------------------------------------------------------------------------
-// Validate scripts
-// --------------------------------------------------------------------------
-//
-
-def validateAddonScripts = tasks.register(
-    "validateAddonScripts"
-) {
-    group = "ncm-api-enhanced"
-
-    doLast {
-        if (!file(packScript).exists()) {
-            throw new GradleException(
-                "pack.mjs not found at ${packScript}"
-            )
-        }
-
-        if (!file(packageAddonsScript).exists()) {
-            throw new GradleException(
-                "package-addons.mjs not found at ${packageAddonsScript}"
-            )
-        }
-    }
-}
-
-//
-// --------------------------------------------------------------------------
-// Build Bare native addons
-// --------------------------------------------------------------------------
-//
-// pack.mjs is responsible for:
-//
-//   bridge.js
-//       |
-//       v
-//   bare-pack
-//
-// and:
-//
-//   bare-link
-//       |
-//       v
-//   android/addons/<abi>/*.so
-//
-// One HOST is generated at a time because bare-link selects native
-// prebuilds according to the requested Bare host.
-//
-
-def buildBareAddons = tasks.register(
-    "buildBareAddons"
+def validateAddonJars = tasks.register(
+    "validateAddonJars"
 ) {
     group = "ncm-api-enhanced"
 
     description =
-        "Builds Bare native addon .so files for all Android ABIs."
-
-    dependsOn(validateAddonScripts)
-
-    inputs.dir(
-        "${projectDir}/../assets/bridge"
-    )
-
-    outputs.dir(
-        addonsDir
-    )
+        "Validates pre-generated Bare Android addon JARs."
 
     doLast {
-        def nodeExecutable = ncmNodePath()
 
-        println ""
-        println "============================================================"
-        println " ncm-api-enhanced: building Bare Android addons"
-        println " Node   : ${nodeExecutable}"
-        println " Bridge : ${bridgeDir}"
-        println " Output : ${addonsDir}"
-        println "============================================================"
-        println ""
+        if (!addonsJarsDir.exists()) {
+            throw new RuntimeException(
+                "ncm_api_enhanced: addon JAR directory does not exist:\n" +
+                "  ${addonsJarsDir.absolutePath}\n\n" +
+                "Expected pre-generated Android addon JARs."
+            )
+        }
 
-        //
-        // Remove stale addon output.
-        //
-        file(addonsDir).deleteDir()
-        file(addonsDir).mkdirs()
+        def missing = []
 
-        targetAbis.each { abi ->
-
-            def host = hostBin[abi]
-
-            if (host == null) {
-                throw new GradleException(
-                    "No Bare host mapping for ABI ${abi}"
-                )
-            }
-
-            println ""
-            println "------------------------------------------------------------"
-            println " ABI  : ${abi}"
-            println " HOST : ${host}"
-            println "------------------------------------------------------------"
-
-            //
-            // Run:
-            //
-            //     node assets/bridge/pack.mjs
-            //
-            // with:
-            //
-            //     HOST=android-arm64
-            //
-            def pb = new ProcessBuilder(
-                nodeExecutable,
-                packScript
+        addonJarNames.each { name ->
+            def jar = file(
+                "${addonsJarsDir}/${name}"
             )
 
-            //
-            // pack.mjs expects to be run from the package's assets
-            // directory tree. Running from bridgeDir keeps all relative
-            // resolution behaviour identical to manual invocation.
-            //
-            pb.directory(
-                file(bridgeDir)
-            )
-
-            pb.environment()["HOST"] = host
-
-            //
-            // Make Node's stdout/stderr visible in Gradle output.
-            //
-            pb.redirectErrorStream(true)
-
-            println ""
-            println "Running:"
-            println "  ${nodeExecutable} ${packScript}"
-            println "  HOST=${host}"
-            println ""
-
-            def process
-
-            try {
-                process = pb.start()
-            } catch (IOException e) {
-                throw new GradleException(
-                    "Unable to start Node executable '${nodeExecutable}'. " +
-                    "Set NCM_NODE to an absolute Node path.",
-                    e
+            if (!jar.exists()) {
+                missing << name
+            } else if (jar.length() == 0) {
+                throw new RuntimeException(
+                    "ncm_api_enhanced: addon JAR is empty:\n" +
+                    "  ${jar.absolutePath}"
                 )
             }
+        }
 
-            def output = process.inputStream.getText("UTF-8")
-
-            def exitCode = process.waitFor()
-
-            if (!output.trim().isEmpty()) {
-                println output
-            }
-
-            if (exitCode != 0) {
-                throw new GradleException(
-                    "pack.mjs failed for ABI ${abi} " +
-                    "(HOST=${host}, exit=${exitCode})"
-                )
-            }
-
-            //
-            // pack.mjs writes using the Android ABI directory names.
-            //
-            def abiDir = file(
-                "${addonsDir}/${abi}"
-            )
-
-            if (
-                !abiDir.exists() ||
-                abiDir.listFiles() == null
-            ) {
-                throw new GradleException(
-                    "pack.mjs completed but did not create " +
-                    "${abiDir}"
-                )
-            }
-
-            def soFiles = abiDir.listFiles().findAll {
-                it.isFile() && it.name.endsWith(".so")
-            }
-
-            if (soFiles.isEmpty()) {
-                throw new GradleException(
-                    "pack.mjs completed but produced no .so files " +
-                    "for ABI ${abi}"
-                )
-            }
-
-            println(
-                "ncm-api-enhanced: ${soFiles.size()} addon(s) built for ${abi}"
+        if (!missing.isEmpty()) {
+            throw new RuntimeException(
+                "ncm_api_enhanced: missing pre-generated Android " +
+                "addon JAR(s):\n" +
+                missing.collect {
+                    "  android/addons-jars/${it}"
+                }.join("\n") +
+                "\n\nThese files must be generated before the Flutter/Gradle build."
             )
         }
 
         println ""
         println "============================================================"
-        println " ncm-api-enhanced: Bare addon native libraries built"
-        println " Output: ${addonsDir}"
+        println " ncm-api-enhanced: pre-generated Bare addon JARs"
+        println "============================================================"
+
+        addonJarNames.each { name ->
+            def jar = file(
+                "${addonsJarsDir}/${name}"
+            )
+
+            println(
+                "  ${name} (${jar.length()} bytes)"
+            )
+        }
+
         println "============================================================"
         println ""
     }
@@ -358,178 +195,45 @@ def buildBareAddons = tasks.register(
 
 //
 // --------------------------------------------------------------------------
-// Package Bare addons into JARs
+// Dependencies
 // --------------------------------------------------------------------------
 //
-// package-addons.mjs is the ONLY place that knows how to construct the
-// JAR/ZIP structure.
+// The addon JARs are ordinary Gradle dependencies.
 //
-// Input:
+// There is deliberately NO .builtBy() relationship.
 //
-//     android/addons/<abi>/*.so
+// Why:
 //
-// Output:
-//
-//     android/addons-jars/<abi>.jar
-//
-// JAR:
-//
-//     lib/<abi>/libbare-*.so
+// These files are pre-generated package artifacts, not Gradle outputs.
 //
 // --------------------------------------------------------------------------
 //
 
-def packageBareAddonJars = tasks.register(
-    "packageBareAddonJars"
-) {
-    group = "ncm-api-enhanced"
+dependencies {
 
-    description =
-        "Packages Bare native addon .so files into ABI-specific JARs."
-
-    dependsOn(buildBareAddons)
-
-    inputs.dir(
-        addonsDir
-    )
-
-    outputs.dir(
-        addonsJarsDir
-    )
-
-    doLast {
-        def nodeExecutable = ncmNodePath()
-
-        println ""
-        println "============================================================"
-        println " ncm-api-enhanced: packaging Bare addon JARs"
-        println " Node   : ${nodeExecutable}"
-        println " Input  : ${addonsDir}"
-        println " Output : ${addonsJarsDir}"
-        println "============================================================"
-        println ""
-
-        //
-        // package-addons.mjs itself handles:
-        //
-        //   arm64-v8a
-        //   armeabi-v7a
-        //   x86_64
-        //   x86
-        //
-        // and skips ABIs that do not exist.
-        //
-
-        def pb = new ProcessBuilder(
-            nodeExecutable,
-            packageAddonsScript
+    implementation(
+        fileTree(
+            dir: addonsJarsDir,
+            include: "*.jar"
         )
-
-        pb.directory(
-            file(bridgeDir)
-        )
-
-        pb.redirectErrorStream(true)
-
-        println "Running:"
-        println "  ${nodeExecutable} ${packageAddonsScript}"
-        println ""
-
-        def process
-
-        try {
-            process = pb.start()
-        } catch (IOException e) {
-            throw new GradleException(
-                "Unable to start Node executable '${nodeExecutable}'. " +
-                "Set NCM_NODE to an absolute Node path.",
-                e
-            )
-        }
-
-        def output = process.inputStream.getText("UTF-8")
-
-        def exitCode = process.waitFor()
-
-        if (!output.trim().isEmpty()) {
-            println output
-        }
-
-        if (exitCode != 0) {
-            throw new GradleException(
-                "package-addons.mjs failed (exit=${exitCode})"
-            )
-        }
-
-        //
-        // Verify that at least one JAR was generated.
-        //
-
-        def jarFiles = file(addonsJarsDir).exists()
-            ? file(addonsJarsDir).listFiles()?.findAll {
-                it.isFile() && it.name.endsWith(".jar")
-            }
-            : []
-
-        if (jarFiles == null || jarFiles.isEmpty()) {
-            throw new GradleException(
-                "package-addons.mjs completed but produced no JARs " +
-                "under ${addonsJarsDir}"
-            )
-        }
-
-        println ""
-        println "ncm-api-enhanced: generated JARs:"
-
-        jarFiles.sort { a, b ->
-            a.name <=> b.name
-        }.each { jar ->
-            println(
-                "  ${jar.name} (${jar.length()} bytes)"
-            )
-        }
-
-        println ""
-        println "============================================================"
-        println " ncm-api-enhanced: Bare addon JAR packaging complete"
-        println " Output: ${addonsJarsDir}"
-        println "============================================================"
-        println ""
-    }
+    )
 }
 
 //
 // --------------------------------------------------------------------------
-// Android build integration
-// --------------------------------------------------------------------------
+// Make validation happen before Android compilation.
 //
-// The JARs are generated under:
-//
-//     android/addons-jars/
-//
-// They are ordinary Gradle dependencies.
-//
-// IMPORTANT:
-//
-// Do NOT put them under:
-//
-//     build/addons/
-//
-// anymore.
-//
-// The JARs themselves contain:
-//
-//     lib/<abi>/*.so
+// No generation occurs here.
 //
 // --------------------------------------------------------------------------
 //
 
 tasks.named("preBuild") {
-    dependsOn(packageBareAddonJars)
+    dependsOn(validateAddonJars)
 }
 
 tasks.named("assemble") {
-    dependsOn(packageBareAddonJars)
+    dependsOn(validateAddonJars)
 }
 
 //
@@ -543,36 +247,4 @@ kotlin {
         jvmTarget =
             org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
-}
-
-//
-// --------------------------------------------------------------------------
-// Dependencies
-// --------------------------------------------------------------------------
-//
-
-dependencies {
-
-    //
-    // Generated Bare addon JARs.
-    //
-    // packageBareAddonJars guarantees that these exist before the
-    // dependency is consumed.
-    //
-    implementation(
-        fileTree(
-            dir: addonsJarsDir,
-            include: "*.jar"
-        ).builtBy(packageBareAddonJars)
-    )
-
-    //
-    // bare_flutter provides Bare Kit itself:
-    //
-    //   libbare-kit.so
-    //   Bare Java API
-    //   Worklet / IPC classes
-    //
-    // This module deliberately does NOT duplicate bare-kit.
-    //
 }
