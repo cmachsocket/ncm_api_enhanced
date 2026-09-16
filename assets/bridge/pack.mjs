@@ -15,10 +15,11 @@
 //       -> patch.mjs
 //       -> bare-pack
 //       -> bundle.addons
+//       -> actual node_modules package tree
 //       -> bare-link
-//       -> dist/ncm.bundle
+//       -> android/addons/
 //
-// Do NOT feed dist/bundle.js into bare-pack.
+// DO NOT feed dist/bundle.js into bare-pack.
 //
 // bare-pack needs to see the original module boundaries of Bare native
 // packages such as:
@@ -27,7 +28,8 @@
 //   node_modules/bare-fs/binding.js
 //   node_modules/bare-crypto/binding.js
 //
-// so that require.addon() can resolve relative to the binding.js module.
+// so that require.addon() remains associated with the correct binding.js
+// module and bare-pack can produce the correct linked: resolution.
 //
 // The important build order is:
 //
@@ -39,7 +41,12 @@
 //        +---- bundle.addons
 //        |
 //        v
-//   resolve actual addon packages
+//   ACTUAL node_modules TREE
+//        |
+//        +---- package.json { addon: true }
+//        |
+//        v
+//   addon package path
 //        |
 //        v
 //   bare-link
@@ -48,15 +55,22 @@
 //   android/addons/
 //
 // Output:
+//
 //   assets/bridge/dist/ncm.bundle
 //
 
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { dirname, resolve as resolvePosix } from "node:path";
+import {
+  dirname,
+  resolve as resolvePosix,
+  relative,
+  basename,
+} from "node:path";
 import { createRequire } from "node:module";
 import { env, stdout, stderr, exit, platform, arch } from "node:process";
 import {
   stat,
+  realpath,
   readFile,
   readdir,
   writeFile,
@@ -75,15 +89,9 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 
 const bridgeDir = resolvePosix(scriptDir);
 
-const bridgeNodeModules = resolvePosix(
-  bridgeDir,
-  "node_modules",
-);
+const bridgeNodeModules = resolvePosix(bridgeDir, "node_modules");
 
-const distDir = resolvePosix(
-  bridgeDir,
-  "dist",
-);
+const distDir = resolvePosix(bridgeDir, "dist");
 
 //
 // IMPORTANT:
@@ -94,30 +102,23 @@ const distDir = resolvePosix(
 //
 //   dist/bundle.js
 //
-// because esbuild has already flattened the module graph there and native
-// Bare modules such as bare-path/binding.js lose their original referrer.
+// because esbuild has already flattened the module graph and native Bare
+// module boundaries such as bare-path/binding.js would no longer be visible
+// as the original module graph.
 //
 
-const entryPath = resolvePosix(
-  bridgeDir,
-  "bridge.js",
-);
+const entryPath = resolvePosix(bridgeDir, "bridge.js");
 
-const outputPath = resolvePosix(
-  distDir,
-  "ncm.bundle",
-);
+const outputPath = resolvePosix(distDir, "ncm.bundle");
 
-const esbuildBundlePath = resolvePosix(
-  distDir,
-  "bundle.js",
-);
+const esbuildBundlePath = resolvePosix(distDir, "bundle.js");
 
 //
 // Native addons linked by bare-link are written here.
 //
-// hook/build.dart can subsequently consume this directory.
+// Flutter's Android build hook subsequently consumes this directory.
 //
+
 const androidAddonsRoot = resolvePosix(
   bridgeDir,
   "..",
@@ -130,12 +131,7 @@ const androidAddonsRoot = resolvePosix(
 // createRequire() needs an actual CommonJS file path.
 //
 
-const bridgeRequire = createRequire(
-  resolvePosix(
-    bridgeDir,
-    "_anchor.cjs",
-  ),
-);
+const bridgeRequire = createRequire(resolvePosix(bridgeDir, "_anchor.cjs"));
 
 //
 // --------------------------------------------------------------------------
@@ -143,26 +139,15 @@ const bridgeRequire = createRequire(
 // --------------------------------------------------------------------------
 //
 
-const pack = bridgeRequire(
-  resolvePosix(
-    bridgeNodeModules,
-    "bare-pack",
-  ),
+const pack = bridgeRequire(resolvePosix(bridgeNodeModules, "bare-pack"));
+
+const bareModuleTraverse = bridgeRequire(
+  resolvePosix(bridgeNodeModules, "bare-module-traverse"),
 );
 
-const resolveBare = bridgeRequire(
-  resolvePosix(
-    bridgeNodeModules,
-    "bare-module-traverse",
-  ),
-).resolve;
+const resolveBare = bareModuleTraverse.resolve;
 
-const bareLink = bridgeRequire(
-  resolvePosix(
-    bridgeNodeModules,
-    "bare-link",
-  ),
-);
+const bareLink = bridgeRequire(resolvePosix(bridgeNodeModules, "bare-link"));
 
 //
 // --------------------------------------------------------------------------
@@ -175,16 +160,14 @@ const bareLink = bridgeRequire(
 //   path     -> bare-path
 //   crypto   -> bare-crypto
 //
-// bare-node-runtime is therefore NOT unused. Its imports.json is the
-// import map consumed by bare-pack while traversing the original graph.
+// bare-node-runtime is therefore part of the ORIGINAL dependency graph.
+// Its imports.json is supplied to bare-pack so Node builtin imports are
+// redirected to the corresponding Bare modules.
 //
 
 const nodeRuntimeImports = JSON.parse(
   await readFile(
-    resolvePosix(
-      bridgeNodeModules,
-      "bare-node-runtime/imports.json",
-    ),
+    resolvePosix(bridgeNodeModules, "bare-node-runtime", "imports.json"),
     "utf8",
   ),
 );
@@ -198,13 +181,8 @@ const nodeRuntimeImports = JSON.parse(
 try {
   await stat(entryPath);
 } catch {
-  stderr.write(
-    `[pack] missing entry: ${entryPath}\n`,
-  );
-
-  stderr.write(
-    `[pack] expected source entry: ${bridgeDir}/bridge.js\n`,
-  );
+  stderr.write(`[pack] missing entry: ${entryPath}\n`);
+  stderr.write(`[pack] expected source entry: ${bridgeDir}/bridge.js\n`);
 
   exit(1);
 }
@@ -216,16 +194,11 @@ try {
 //
 
 function pathFromURL(url) {
-  return url.protocol === "file:"
-    ? fileURLToPath(url)
-    : null;
+  return url.protocol === "file:" ? fileURLToPath(url) : null;
 }
 
 function isInside(filePath, directory) {
-  return (
-    filePath === directory ||
-    filePath.startsWith(directory + "/")
-  );
+  return filePath === directory || filePath.startsWith(directory + "/");
 }
 
 function isJavaScriptFile(filePath) {
@@ -301,10 +274,7 @@ async function readModule(url) {
   let source;
 
   try {
-    source = await readFile(
-      filePath,
-      "utf8",
-    );
+    source = await readFile(filePath, "utf8");
   } catch (error) {
     //
     // bare-module-traverse probes multiple candidates.
@@ -321,20 +291,13 @@ async function readModule(url) {
     // ENOENT/EISDIR simply mean this candidate is not a readable module.
     //
 
-    if (
-      error?.code === "ENOENT" ||
-      error?.code === "EISDIR"
-    ) {
+    if (error?.code === "ENOENT" || error?.code === "EISDIR") {
       return null;
     }
 
-    stderr.write(
-      `[pack] readModule failed: ${filePath}\n`,
-    );
+    stderr.write(`[pack] readModule failed: ${filePath}\n`);
 
-    stderr.write(
-      `${error?.stack || error}\n`,
-    );
+    stderr.write(`${error?.stack || error}\n`);
 
     throw error;
   }
@@ -344,28 +307,18 @@ async function readModule(url) {
   //
 
   if (!isJavaScriptFile(filePath)) {
-    return Buffer.from(
-      source,
-      "utf8",
-    );
+    return Buffer.from(source, "utf8");
   }
 
   //
   // Apply Bare-specific source patches.
   //
 
-  const patched = patchSource(
-    filePath,
-    source,
-    {
-      target: "bare",
-    },
-  );
+  const patched = patchSource(filePath, source, {
+    target: "bare",
+  });
 
-  return Buffer.from(
-    patched,
-    "utf8",
-  );
+  return Buffer.from(patched, "utf8");
 }
 
 //
@@ -399,21 +352,15 @@ async function* listPrefix(url) {
   let entries;
 
   try {
-    entries = await readdir(
-      dir,
-      {
-        withFileTypes: true,
-      },
-    );
+    entries = await readdir(dir, {
+      withFileTypes: true,
+    });
   } catch {
     return;
   }
 
   for (const entry of entries) {
-    const child = resolvePosix(
-      dir,
-      entry.name,
-    );
+    const child = resolvePosix(dir, entry.name);
 
     yield pathToFileURL(child);
 
@@ -432,23 +379,15 @@ async function* listPrefix(url) {
     let children;
 
     try {
-      children = await readdir(
-        child,
-        {
-          withFileTypes: true,
-        },
-      );
+      children = await readdir(child, {
+        withFileTypes: true,
+      });
     } catch {
       continue;
     }
 
     for (const grandchild of children) {
-      yield pathToFileURL(
-        resolvePosix(
-          child,
-          grandchild.name,
-        ),
-      );
+      yield pathToFileURL(resolvePosix(child, grandchild.name));
     }
   }
 }
@@ -459,17 +398,12 @@ async function* listPrefix(url) {
 // --------------------------------------------------------------------------
 //
 
-const HOSTS = (
-  env.HOST ??
-  `${platform}-${arch}`
-)
+const HOSTS = (env.HOST ?? `${platform}-${arch}`)
   .split(",")
   .map((host) => host.trim())
   .filter(Boolean);
 
-const androidHosts = HOSTS.filter(
-  (host) => host.startsWith("android-"),
-);
+const androidHosts = HOSTS.filter((host) => host.startsWith("android-"));
 
 //
 // --------------------------------------------------------------------------
@@ -477,20 +411,14 @@ const androidHosts = HOSTS.filter(
 // --------------------------------------------------------------------------
 //
 
-stderr.write(
-  `[pack] entry: ${entryPath}\n`,
-);
+stderr.write(`[pack] entry: ${entryPath}\n`);
+
+stderr.write(`[pack] hosts: ${HOSTS.join(", ")}\n`);
+
+stderr.write(`[pack] out:   ${outputPath}\n`);
 
 stderr.write(
-  `[pack] hosts: ${HOSTS.join(", ")}\n`,
-);
-
-stderr.write(
-  `[pack] out:   ${outputPath}\n`,
-);
-
-stderr.write(
-  `[pack] mode:  source -> patch -> bare-pack -> bare-link\n`,
+  `[pack] mode:  source -> patch -> bare-pack -> addon-tree -> bare-link\n`,
 );
 
 //
@@ -505,10 +433,9 @@ stderr.write(
 // It traverses the actual module graph and determines the exact native
 // addon URLs that belong to this bundle.
 //
-// We intentionally do NOT scan all node_modules/bare-* packages before
-// packing.
-//
 // bundle.addons is the source of truth.
+//
+// We intentionally do NOT scan node_modules before packing.
 //
 
 let bundle;
@@ -522,12 +449,7 @@ try {
       //
       //   assets/bridge/
       //
-      // This allows the bundle to retain the original module structure.
-      //
-
-      base: pathToFileURL(
-        bridgeDir,
-      ),
+      base: pathToFileURL(bridgeDir),
 
       //
       // Node -> Bare builtin redirects.
@@ -546,10 +468,7 @@ try {
       // conditions in its exports map.
       //
 
-      conditions: [
-        "node",
-        "module-sync",
-      ],
+      conditions: ["node", "module-sync"],
 
       //
       // Native addon target.
@@ -566,7 +485,7 @@ try {
       //
       // Mobile runtimes link native addons ahead of time.
       //
-      // Therefore addon resolutions must use:
+      // Therefore addon resolutions use:
       //
       //   linked:
       //
@@ -589,13 +508,8 @@ try {
     listPrefix,
   );
 } catch (error) {
-  stderr.write(
-    "\n[pack] bare-pack failed\n",
-  );
-
-  stderr.write(
-    `${error?.stack || error}\n`,
-  );
+  stderr.write("\n[pack] bare-pack failed\n");
+  stderr.write(`${error?.stack || error}\n`);
 
   exit(1);
 }
@@ -606,196 +520,411 @@ try {
 // --------------------------------------------------------------------------
 //
 
-const bundledAddons = Array.isArray(
-  bundle?.addons,
-)
-  ? bundle.addons
-  : [];
+const bundledAddons = Array.isArray(bundle?.addons) ? bundle.addons : [];
 
-const bundledAssets = Array.isArray(
-  bundle?.assets,
-)
-  ? bundle.assets
-  : [];
+const bundledAssets = Array.isArray(bundle?.assets) ? bundle.assets : [];
 
 stdout.write(
   `\n[pack] bare-pack discovered ${bundledAddons.length} native addon(s)\n`,
 );
 
 if (bundledAddons.length > 0) {
-  stdout.write(
-    "\n[pack] bundle.addons:\n",
-  );
+  stdout.write("\n[pack] bundle.addons:\n");
 
   for (const addon of bundledAddons) {
-    stdout.write(
-      `  ${addon}\n`,
-    );
+    stdout.write(`  ${addon}\n`);
   }
 }
 
 if (bundledAssets.length > 0) {
-  stdout.write(
-    "\n[pack] bundle.assets:\n",
-  );
+  stdout.write("\n[pack] bundle.assets:\n");
 
   for (const asset of bundledAssets) {
-    stdout.write(
-      `  ${asset}\n`,
-    );
+    stdout.write(`  ${asset}\n`);
   }
 }
 
 //
 // --------------------------------------------------------------------------
-// Addon package discovery
+// Actual node_modules addon discovery
 // --------------------------------------------------------------------------
 //
-// bundle.addons contains RESOLVED addon URLs, for example:
+// DO NOT use:
 //
-//   linked:libbare-type.1.1.1.so
+//   npm ls --all --json
 //
-// bare-link, however, operates on an addon PACKAGE ROOT.
+// here.
 //
-// Therefore we build a small index of addon packages:
+// `npm ls` describes npm's logical dependency tree, but the thing
+// bare-link needs is the ACTUAL physical addon package directory.
 //
-//   linked URL
-//        |
-//        v
-//   package.json
-//        |
-//        v
-//   package root
+// In this project there can be:
 //
-// IMPORTANT:
+//   node_modules/bare-module
 //
-// We do NOT use this index to decide which addons are needed.
+// and:
 //
-// bare-pack has already made that decision.
+//   node_modules/bare-node-runtime/node_modules/bare-module
 //
-// The index is only used to map the addons discovered by bare-pack back
-// to their package roots for bare-link.
+// with different versions.
+//
+// The filesystem therefore remains the authoritative source for package
+// roots.
+//
+// We recursively inspect every actual `node_modules` directory under the
+// bridge tree.
+//
+// We do NOT link everything we discover.
+//
+// Discovery only builds:
+//
+//   name + version -> package path
+//
+// bundle.addons remains the authority for what actually gets linked.
 //
 
-async function readPackageJson(packagePath) {
+//
+// --------------------------------------------------------------------------
+// Package JSON cache
+// --------------------------------------------------------------------------
+//
+
+const packageJsonCache = new Map();
+
+async function loadPackageJson(packagePath) {
+  const normalizedPath = resolvePosix(packagePath);
+
+  const cached = packageJsonCache.get(normalizedPath);
+
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  let packageJson;
+
   try {
-    return JSON.parse(
-      await readFile(
-        resolvePosix(
-          packagePath,
-          "package.json",
-        ),
-        "utf8",
-      ),
+    packageJson = JSON.parse(
+      await readFile(resolvePosix(normalizedPath, "package.json"), "utf8"),
     );
   } catch {
-    return null;
+    packageJson = null;
   }
+
+  packageJsonCache.set(normalizedPath, packageJson);
+
+  return packageJson;
 }
 
-async function collectAddonPackages() {
-  const result = [];
+//
+// --------------------------------------------------------------------------
+// Realpath helper
+// --------------------------------------------------------------------------
+//
+// pnpm and other package managers may represent dependencies using
+// symlinks.
+//
+// We retain BOTH:
+//
+//   logical path
+//
+// and:
+//
+//   physical real path
+//
+// because a linked package can be reached through several node_modules
+// locations.
+//
 
-  let entries;
+const realpathCache = new Map();
 
-  try {
-    entries = await readdir(
-      bridgeNodeModules,
-      {
-        withFileTypes: true,
-      },
-    );
-  } catch (error) {
-    stderr.write(
-      `[pack] failed to read node_modules: ${error?.stack || error}\n`,
-    );
+async function getRealPath(filePath) {
+  const normalizedPath = resolvePosix(filePath);
 
-    throw error;
+  const cached = realpathCache.get(normalizedPath);
+
+  if (cached !== undefined) {
+    return cached;
   }
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
+  let result;
+
+  try {
+    result = await realpath(normalizedPath);
+  } catch {
+    result = normalizedPath;
+  }
+
+  realpathCache.set(normalizedPath, result);
+
+  return result;
+}
+
+//
+// --------------------------------------------------------------------------
+// Find package root
+// --------------------------------------------------------------------------
+//
+// A node_modules child can itself be:
+//
+//   node_modules/foo
+//
+// or:
+//
+//   node_modules/@scope/foo
+//
+// We inspect package.json directly instead of relying on directory name
+// parsing.
+//
+
+async function inspectPackageDirectory(packagePath) {
+  const packageJson = await loadPackageJson(packagePath);
+
+  if (!packageJson) {
+    return null;
+  }
+
+  if (packageJson.addon !== true) {
+    return null;
+  }
+
+  if (
+    typeof packageJson.name !== "string" ||
+    typeof packageJson.version !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    path: resolvePosix(packagePath),
+    realPath: await getRealPath(packagePath),
+    name: packageJson.name,
+    version: packageJson.version,
+    packageJson,
+  };
+}
+
+//
+// --------------------------------------------------------------------------
+// Recursive node_modules traversal
+// --------------------------------------------------------------------------
+//
+// This deliberately traverses:
+//
+//   node_modules/*
+//
+// and:
+//
+//   node_modules/*/node_modules/*
+//
+// and so on.
+//
+// This is the important difference from the old implementation, which
+// only looked at:
+//
+//   bridge/node_modules/*
+//
+// and therefore missed:
+//
+//   bridge/node_modules/bare-node-runtime/node_modules/bare-module
+//
+// The traversal is filesystem based because the physical package roots are
+// exactly what bare-link's API expects.
+//
+
+async function collectAddonPackages() {
+  stderr.write(
+    "\n[pack] resolving addon packages from actual node_modules tree...\n",
+  );
+
+  const result = [];
+
+  //
+  // Logical package paths already visited.
+  //
+
+  const visitedPaths = new Set();
+
+  //
+  // Real package locations already visited.
+  //
+  // This prevents following the same pnpm symlink target repeatedly.
+  //
+
+  const visitedRealPaths = new Set();
+
+  //
+  // Prevent traversing arbitrary non-node_modules directories.
+  //
+
+  const visitedNodeModules = new Set();
+
+  async function visitNodeModules(nodeModulesPath) {
+    const normalizedNodeModules = resolvePosix(nodeModulesPath);
+
+    if (visitedNodeModules.has(normalizedNodeModules)) {
+      return;
     }
 
-    //
-    // Handle:
-    //
-    //   node_modules/bare-*
-    //
-    // and:
-    //
-    //   node_modules/bare/*
-    //
+    visitedNodeModules.add(normalizedNodeModules);
 
-    if (entry.name === "bare") {
-      const scopedRoot = resolvePosix(
-        bridgeNodeModules,
-        "bare",
-      );
+    let entries;
 
-      let scopedEntries;
+    try {
+      entries = await readdir(normalizedNodeModules, {
+        withFileTypes: true,
+      });
+    } catch {
+      return;
+    }
 
-      try {
-        scopedEntries = await readdir(
-          scopedRoot,
-          {
-            withFileTypes: true,
-          },
-        );
-      } catch {
+    for (const entry of entries) {
+      //
+      // Ignore files.
+      //
+
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) {
         continue;
       }
 
-      for (const scoped of scopedEntries) {
-        if (!scoped.isDirectory()) {
+      //
+      // Ignore npm metadata directories.
+      //
+
+      if (entry.name === ".bin" || entry.name === ".package-lock.json") {
+        continue;
+      }
+
+      //
+      // Resolve scoped package layout:
+      //
+      //   node_modules/@scope/package
+      //
+
+      let packagePath;
+
+      if (entry.name.startsWith("@")) {
+        let scopeEntries;
+
+        try {
+          scopeEntries = await readdir(
+            resolvePosix(normalizedNodeModules, entry.name),
+            {
+              withFileTypes: true,
+            },
+          );
+        } catch {
           continue;
         }
 
-        const packagePath = resolvePosix(
-          scopedRoot,
-          scoped.name,
-        );
+        for (const scopeEntry of scopeEntries) {
+          if (!scopeEntry.isDirectory() && !scopeEntry.isSymbolicLink()) {
+            continue;
+          }
 
-        const packageJson = await readPackageJson(
-          packagePath,
-        );
+          packagePath = resolvePosix(
+            normalizedNodeModules,
+            entry.name,
+            scopeEntry.name,
+          );
 
-        if (
-          packageJson?.addon === true
-        ) {
-          result.push({
-            path: packagePath,
-            name: packageJson.name,
-            version: packageJson.version,
-          });
+          await inspectAndQueuePackage(packagePath);
         }
+
+        continue;
       }
 
-      continue;
+      //
+      // Normal package:
+      //
+      //   node_modules/package
+      //
+
+      packagePath = resolvePosix(normalizedNodeModules, entry.name);
+
+      await inspectAndQueuePackage(packagePath);
+    }
+  }
+
+  async function inspectAndQueuePackage(packagePath) {
+    const normalizedPackagePath = resolvePosix(packagePath);
+
+    if (visitedPaths.has(normalizedPackagePath)) {
+      return;
     }
 
-    if (!entry.name.startsWith("bare-")) {
-      continue;
+    visitedPaths.add(normalizedPackagePath);
+
+    //
+    // Check whether this directory itself is an addon.
+    //
+
+    const addon = await inspectPackageDirectory(normalizedPackagePath);
+
+    if (addon) {
+      //
+      // If this is a symlink, avoid collecting the same physical package
+      // more than once.
+      //
+
+      if (!visitedRealPaths.has(addon.realPath)) {
+        visitedRealPaths.add(addon.realPath);
+
+        result.push(addon);
+      }
     }
 
-    const packagePath = resolvePosix(
-      bridgeNodeModules,
-      entry.name,
+    //
+    // IMPORTANT:
+    //
+    // Even if the package is NOT an addon, its own nested node_modules
+    // can contain addons.
+    //
+    // Example:
+    //
+    //   bare-node-runtime/
+    //     node_modules/
+    //       bare-module/
+    //
+    const nestedNodeModules = resolvePosix(
+      normalizedPackagePath,
+      "node_modules",
     );
 
-    const packageJson = await readPackageJson(
-      packagePath,
-    );
+    await visitNodeModules(nestedNodeModules);
+  }
 
-    if (
-      packageJson?.addon === true
-    ) {
-      result.push({
-        path: packagePath,
-        name: packageJson.name,
-        version: packageJson.version,
-      });
+  //
+  // Start at the project's root node_modules.
+  //
+
+  await visitNodeModules(bridgeNodeModules);
+
+  //
+  // Deterministic order.
+  //
+
+  result.sort(
+    (a, b) =>
+      a.name.localeCompare(b.name) ||
+      a.version.localeCompare(b.version) ||
+      a.realPath.localeCompare(b.realPath),
+  );
+
+  stdout.write(
+    `[pack] actual node_modules tree contains ${result.length} addon package node(s)\n`,
+  );
+
+  if (result.length > 0) {
+    stdout.write("\n[pack] discovered addon packages:\n");
+
+    for (const pkg of result) {
+      stdout.write(`  ${pkg.name}@${pkg.version}\n`);
+
+      stdout.write(`    path:     ${pkg.path}\n`);
+
+      if (pkg.realPath !== pkg.path) {
+        stdout.write(`    realPath: ${pkg.realPath}\n`);
+      }
     }
   }
 
@@ -804,14 +933,10 @@ async function collectAddonPackages() {
 
 //
 // --------------------------------------------------------------------------
-// Match bare-pack addon URL -> addon package
+// Match bundle addon -> package
 // --------------------------------------------------------------------------
 //
-// For Android/Linux-style linked addons, bare-pack produces:
-//
-//   linked:lib<package-name>.<version>.so
-//
-// Example:
+// For Android/Linux linked addons:
 //
 //   bare-type@1.1.1
 //
@@ -819,96 +944,78 @@ async function collectAddonPackages() {
 //
 //   linked:libbare-type.1.1.1.so
 //
-// We therefore derive the expected linked filename from package metadata
-// instead of guessing from arbitrary node_modules directory names.
+// We therefore derive the exact artifact name from package metadata.
 //
 
-function getLinkedAddonBasename(
-  packageJson,
-) {
+function getLinkedAddonBasename(packageJson) {
   if (
-    !packageJson?.name ||
-    !packageJson?.version
+    !packageJson ||
+    typeof packageJson.name !== "string" ||
+    typeof packageJson.version !== "string"
   ) {
     return null;
   }
-
-  //
-  // bare-pack's Android/Linux linked addon convention:
-  //
-  //   lib<name>.<version>.so
-  //
-  //
 
   return `lib${packageJson.name}.${packageJson.version}.so`;
 }
 
 function normalizeAddonHref(href) {
-  if (
-    typeof href !== "string"
-  ) {
+  if (typeof href !== "string") {
     return null;
   }
 
-  //
-  // The bundle may contain:
-  //
-  //   linked:libbare-type.1.1.1.so
-  //
-  // but for matching we only need the URL path/basename.
-  //
-
-  if (
-    href.startsWith("linked:")
-  ) {
-    return href.slice(
-      "linked:".length,
-    );
+  if (href.startsWith("linked:")) {
+    return href.slice("linked:".length);
   }
 
   return href;
 }
 
-async function resolveAddonPackages(
-  addons,
-) {
+//
+// --------------------------------------------------------------------------
+// Resolve bundle.addons against actual package tree
+// --------------------------------------------------------------------------
+//
+// bundle.addons is the source of truth.
+//
+// The actual node_modules tree is ONLY used to find the package root.
+//
+// A package being present in node_modules does NOT mean it will be linked.
+//
+
+async function resolveAddonPackages(addons) {
   const packages = await collectAddonPackages();
 
-  const packageByLinkedBasename =
-    new Map();
+  //
+  // basename -> physical package nodes
+  //
+
+  const packageByLinkedBasename = new Map();
 
   for (const pkg of packages) {
-    const packageJson = await readPackageJson(
-      pkg.path,
-    );
-
-    const basename =
-      getLinkedAddonBasename(
-        packageJson,
-      );
+    const basename = getLinkedAddonBasename(pkg.packageJson);
 
     if (!basename) {
       continue;
     }
 
-    packageByLinkedBasename.set(
-      basename,
-      {
-        ...pkg,
-        packageJson,
-      },
-    );
+    const existing = packageByLinkedBasename.get(basename);
+
+    if (existing) {
+      existing.push(pkg);
+    } else {
+      packageByLinkedBasename.set(basename, [pkg]);
+    }
   }
 
   const resolved = [];
   const unresolved = [];
 
   for (const addon of addons) {
-    const normalized =
-      normalizeAddonHref(addon);
+    const normalized = normalizeAddonHref(addon);
 
     //
-    // We only need package mapping for actual linked addons.
+    // This stage only handles linked Android/Linux .so artifacts.
     //
 
     if (
@@ -919,19 +1026,44 @@ async function resolveAddonPackages(
       continue;
     }
 
-    const pkg =
-      packageByLinkedBasename.get(
-        normalized,
-      );
+    const matches = packageByLinkedBasename.get(normalized);
 
-    if (!pkg) {
+    if (!matches || matches.length === 0) {
       unresolved.push(addon);
       continue;
     }
 
+    //
+    // Normally there should be exactly one physical package matching a
+    // name/version artifact.
+    //
+    // If several logical package locations resolve to the same physical
+    // package, the realpath dedup above already collapsed them.
+    //
+    // If genuinely different physical packages have identical
+    // name/version, the generated artifact is nevertheless identical.
+    // Pick the deterministic first path.
+    //
+
+    if (matches.length > 1) {
+      stderr.write(
+        `\n[pack] WARNING: multiple addon packages match ${addon}:\n`,
+      );
+
+      for (const match of matches) {
+        stderr.write(`  ${match.path}\n`);
+
+        if (match.realPath !== match.path) {
+          stderr.write(`    -> ${match.realPath}\n`);
+        }
+      }
+
+      stderr.write(`[pack] using: ${matches[0].path}\n`);
+    }
+
     resolved.push({
       addon,
-      ...pkg,
+      ...matches[0],
     });
   }
 
@@ -948,21 +1080,33 @@ async function resolveAddonPackages(
 //
 // This is the SECOND stage.
 //
-// bare-pack has already told us which native addons are actually required.
+// bare-pack has already determined which addons are required.
 //
-// bare-link is now responsible only for materializing those packages into:
+// We now map:
 //
-//   android/addons/
+//   linked:libbare-type.1.1.1.so
 //
-// This keeps pack.mjs as the unified pack + link entry point while making
-// bare-pack the source of truth for addon reachability.
+// back to:
+//
+//   node_modules/.../bare-type
+//
+// and call:
+//
+//   bareLink(packagePath, {
+//     hosts,
+//     out
+//   })
+//
+// IMPORTANT:
+//
+// `needs` is NOT passed.
+//
+// It is not part of bare-link's public API.
 //
 
 async function linkBundleAddons() {
   if (androidHosts.length === 0) {
-    stderr.write(
-      "\n[pack] no Android hosts requested; skipping bare-link\n",
-    );
+    stderr.write("\n[pack] no Android hosts requested; skipping bare-link\n");
 
     return;
   }
@@ -979,13 +1123,12 @@ async function linkBundleAddons() {
   // Only linked Android/Linux .so addons are handled here.
   //
 
-  const linkedAddons =
-    bundledAddons.filter(
-      (addon) =>
-        typeof addon === "string" &&
-        addon.startsWith("linked:") &&
-        addon.endsWith(".so"),
-    );
+  const linkedAddons = bundledAddons.filter(
+    (addon) =>
+      typeof addon === "string" &&
+      addon.startsWith("linked:") &&
+      addon.endsWith(".so"),
+  );
 
   if (linkedAddons.length === 0) {
     stderr.write(
@@ -999,119 +1142,107 @@ async function linkBundleAddons() {
   // Ensure destination exists.
   //
 
-  await mkdir(
-    androidAddonsRoot,
-    {
-      recursive: true,
-    },
-  );
+  await mkdir(androidAddonsRoot, {
+    recursive: true,
+  });
 
-  stderr.write(
-    `\n[pack] bare-link -> ${androidAddonsRoot}\n`,
-  );
+  stderr.write(`\n[pack] bare-link -> ${androidAddonsRoot}\n`);
 
-  stderr.write(
-    `[pack] Android hosts: ${androidHosts.join(", ")}\n`,
-  );
+  stderr.write(`[pack] Android hosts: ${androidHosts.join(", ")}\n`);
 
-  stderr.write(
-    `[pack] linking ${linkedAddons.length} bundle addon(s)\n`,
-  );
+  stderr.write(`[pack] linking ${linkedAddons.length} bundle addon(s)\n`);
 
   //
-  // Map bundle.addons back to addon packages.
+  // Map bundle.addons back to actual addon packages.
   //
 
-  const {
-    resolved,
-    unresolved,
-  } = await resolveAddonPackages(
-    linkedAddons,
-  );
+  const { resolved, unresolved } = await resolveAddonPackages(linkedAddons);
 
   //
-  // Report anything bare-pack requested that we cannot map.
+  // Report anything bare-pack requested that cannot be mapped.
   //
 
   if (unresolved.length > 0) {
     stderr.write(
-      "\n[pack] WARNING: unable to map these bundle addons to local addon packages:\n",
+      "\n[pack] ERROR: unable to map these bundle addons to actual addon packages:\n",
     );
 
     for (const addon of unresolved) {
-      stderr.write(
-        `  ${addon}\n`,
-      );
+      stderr.write(`  ${addon}\n`);
     }
 
-    //
-    // Do NOT silently link every bare-* package as a fallback.
-    //
-    // If bare-pack says an addon is required but our package index cannot
-    // resolve it, failing here is safer than producing a bundle that
-    // appears complete but crashes later with ADDON_NOT_FOUND.
-    //
-
     throw new Error(
-      `Unable to resolve ${unresolved.length} bundled native addon(s) to local addon packages`,
+      [
+        `Unable to resolve ${unresolved.length} bundled native addon(s)`,
+        "to addon packages in the actual node_modules tree.",
+      ].join(" "),
     );
   }
 
   //
-  // Deduplicate packages.
+  // Deduplicate by REAL physical package path.
+  //
+  // This matters when two node_modules locations point at the same package.
   //
 
-  const uniquePackages =
-    new Map();
+  const uniquePackages = new Map();
 
   for (const pkg of resolved) {
-    const key = `${pkg.name}@${pkg.version}`;
-
-    if (!uniquePackages.has(key)) {
-      uniquePackages.set(
-        key,
-        pkg,
-      );
+    if (!uniquePackages.has(pkg.realPath)) {
+      uniquePackages.set(pkg.realPath, pkg);
     }
   }
+
+  //
+  // Print exact mapping.
+  //
+
+  stdout.write("\n[pack] bundle addon -> addon package mapping:\n");
+
+  for (const pkg of resolved) {
+    stdout.write(`  ${pkg.addon}\n`);
+
+    stdout.write(`    ${pkg.name}@${pkg.version}\n`);
+
+    stdout.write(`    ${pkg.path}\n`);
+
+    if (pkg.realPath !== pkg.path) {
+      stdout.write(`    -> ${pkg.realPath}\n`);
+    }
+  }
+
+  //
+  // Link each required addon package.
+  //
 
   let linkedResourceCount = 0;
 
   for (const pkg of uniquePackages.values()) {
-    stderr.write(
-      `[pack] link ${pkg.name}@${pkg.version}\n`,
-    );
+    stderr.write(`\n[pack] link ${pkg.name}@${pkg.version}\n`);
 
-    for await (
-      const resource of bareLink(
-        pkg.path,
-        {
-          hosts: androidHosts,
-          out: androidAddonsRoot,
+    stderr.write(`[pack]   package: ${pkg.path}\n`);
 
-          //
-          // bare-kit itself is supplied separately by the Flutter build
-          // hook, so native addon linking only needs to resolve resources
-          // against libbare-kit.so.
-          //
+    //
+    // IMPORTANT:
+    //
+    // This follows the public bare-link API:
+    //
+    //   link(base, {
+    //     hosts,
+    //     out
+    //   })
+    //
+    // No `needs` option.
+    //
 
-          needs: [
-            "libbare-kit.so",
-          ],
-        },
-      )
-    ) {
+    for await (const resource of bareLink(pkg.path, {
+      hosts: androidHosts,
+      out: androidAddonsRoot,
+    })) {
       linkedResourceCount++;
 
-      //
-      // Keep the resource object available for diagnostics without
-      // depending on its exact shape.
-      //
-
       if (env.DEBUG_BARE_LINK === "1") {
-        stdout.write(
-          `[pack] linked resource: ${String(resource)}\n`,
-        );
+        stdout.write(`[pack] linked resource: ${String(resource)}\n`);
       }
     }
   }
@@ -1123,9 +1254,7 @@ async function linkBundleAddons() {
   //
   // libbare-kit.so is intentionally NOT copied here.
   //
-  // hook/build.dart owns libbare-kit.so because it already has access to
-  // the bare-kit prebuild archive and knows which Flutter code assets /
-  // Android ABIs the application is actually building.
+  // BareKit is supplied separately by the Flutter Android build hook.
   //
 }
 
@@ -1138,13 +1267,9 @@ async function linkBundleAddons() {
 try {
   await linkBundleAddons();
 } catch (error) {
-  stderr.write(
-    "\n[pack] bare-link failed\n",
-  );
+  stderr.write("\n[pack] bare-link failed\n");
 
-  stderr.write(
-    `${error?.stack || error}\n`,
-  );
+  stderr.write(`${error?.stack || error}\n`);
 
   exit(1);
 }
@@ -1154,9 +1279,6 @@ try {
 // Write bundle
 // --------------------------------------------------------------------------
 //
-//
-// IMPORTANT:
-//
 // bare-pack has already finalized:
 //
 //   bundle.resolutions
@@ -1165,20 +1287,15 @@ try {
 //
 // bare-link does NOT modify the bundle itself.
 //
-// It materializes the native libraries that those `linked:` resolutions
-// expect to find in the host application.
+// It materializes the native libraries corresponding to the linked:
+// resolutions in the bundle.
 //
 
 const data = bundle.toBuffer();
 
-await writeFile(
-  outputPath,
-  data,
-);
+await writeFile(outputPath, data);
 
-stdout.write(
-  `\n[pack] wrote ${outputPath} (${data.byteLength} bytes)\n`,
-);
+stdout.write(`\n[pack] wrote ${outputPath} (${data.byteLength} bytes)\n`);
 
 //
 // --------------------------------------------------------------------------
@@ -1186,50 +1303,30 @@ stdout.write(
 // --------------------------------------------------------------------------
 //
 
-stdout.write(
-  `\n[pack] summary:\n`,
-);
+stdout.write(`\n[pack] summary:\n`);
 
-stdout.write(
-  `  entry:  ${entryPath}\n`,
-);
+stdout.write(`  entry:  ${entryPath}\n`);
 
-stdout.write(
-  `  output: ${outputPath}\n`,
-);
+stdout.write(`  output: ${outputPath}\n`);
 
-stdout.write(
-  `  hosts:  ${HOSTS.join(", ")}\n`,
-);
+stdout.write(`  hosts:  ${HOSTS.join(", ")}\n`);
 
-stdout.write(
-  `  addons: ${bundledAddons.length}\n`,
-);
+stdout.write(`  addons: ${bundledAddons.length}\n`);
 
-stdout.write(
-  `  assets: ${bundledAssets.length}\n`,
-);
+stdout.write(`  assets: ${bundledAssets.length}\n`);
 
 if (bundledAddons.length > 0) {
-  stdout.write(
-    "\n[pack] embedded native addons:\n",
-  );
+  stdout.write("\n[pack] linked native addons required by bundle:\n");
 
   for (const addon of bundledAddons) {
-    stdout.write(
-      `  ${addon}\n`,
-    );
+    stdout.write(`  ${addon}\n`);
   }
 }
 
 if (bundledAssets.length > 0) {
-  stdout.write(
-    "\n[pack] bundled assets:\n",
-  );
+  stdout.write("\n[pack] bundled assets:\n");
 
   for (const asset of bundledAssets) {
-    stdout.write(
-      `  ${asset}\n`,
-    );
+    stdout.write(`  ${asset}\n`);
   }
 }

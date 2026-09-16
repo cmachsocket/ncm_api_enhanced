@@ -15,7 +15,7 @@
     "bare-pack": "^2.2.2",
     "bare-run": "^0.0.3",
     "esbuild": "^0.28.2",
-    "bare-module" : "7.0.3"
+    "bare-module" : "6.0.1"
   },
   "scripts": {
     "run": "bare-run dist/ncm.bundle"
