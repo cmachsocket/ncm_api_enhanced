@@ -4,15 +4,16 @@
   "private": true,
   "main": "bridge.js",
   "dependencies": {
-    "@neteasecloudmusicapienhanced/api": "^4.40.1"
+    "@neteasecloudmusicapienhanced/api": "^4.40.1",
+    "@noble/ciphers": "^2.0.0",
+    "@noble/curves": "^2.0.0"
   },
   "devDependencies": {
+    "bare-link": "^3.3.0",
     "bare-module-traverse": "^2.5.5",
     "bare-node-runtime": "^1.5.0",
     "bare-pack": "^1.5.1",
     "bare-run": "^0.0.3",
-
-    "bare-link": "^3.3.0",
     "esbuild": "^0.28.2"
   },
   "scripts": {

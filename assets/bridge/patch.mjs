@@ -240,6 +240,161 @@ export function patchSource(filePath, source, { target = "esbuild" } = {}) {
 
       src = next2;
     }
+
+    // ----------------------------------------------------------
+    // PATCH 3: bare-crypto cannot do X25519.
+    // ----------------------------------------------------------
+    //
+    // The upstream `xeapiEncryptS` uses `crypto.createPublicKey`,
+    // `crypto.generateKeyPairSync('x25519')`, and `crypto.diffieHellman`
+    // to perform the X25519 ECDH half of the eapi↔xeapi handshake.
+    // `bare-crypto` (the bare runtime's `crypto` shim) only ships a
+    // subset of Node's crypto — those three APIs are absent, so any
+    // xeapi call throws `crypto.createPublicKey is not a function`.
+    //
+    // We replace them with @noble/curves (X25519) and @noble/ciphers
+    // (AES-GCM). Both are pure JS, audited, and ship in the bundle.
+    // The wire format produced by noble is bit-for-bit identical to
+    // what Node's OpenSSL backend emits, because:
+    //
+    //   - X25519 follows RFC 7748 strictly (validated against the
+    //     Alice/Bob test vectors in @noble/curves's own test suite).
+    //   - AES-128-GCM is NIST SP 800-38D; noble's implementation
+    //     round-trips with OpenSSL encrypt↔decrypt on real inputs.
+    //
+    // The server cannot distinguish a noble-produced ciphertext from
+    // an OpenSSL-produced one. No further server-side changes are
+    // needed.
+
+    {
+      // Inject the noble requires next to the existing bare-crypto one.
+
+      const headOriginal = `const zlib = require('zlib')`;
+      const headReplacement = `const zlib = require('zlib')
+const { x25519 } = require('@noble/curves/ed25519.js')
+const { gcm } = require('@noble/ciphers/aes.js')`;
+
+      const headNext = src.replace(headOriginal, headReplacement);
+
+      if (headNext !== src) {
+        console.log(
+          "[patch] injected noble requires into",
+          path.relative(bridgeDir, filePath),
+        );
+
+        src = headNext;
+      }
+    }
+
+    {
+      // Drop the unused Node-only helper. Its only caller is replaced
+      // by the new xeapiEncryptS below.
+
+      const fnOriginal = `const createX25519PublicKey = (raw) => {
+  // Node's crypto API expects X25519 public keys as DER SubjectPublicKeyInfo.
+  // The Android SDK stores only the 32-byte raw key, so prepend the fixed
+  // RFC 8410 SPKI header for id-X25519 before importing it.
+  return crypto.createPublicKey({
+    key: Buffer.concat([x25519SpkiPrefix, raw]),
+    format: 'der',
+    type: 'spki',
+  })
+}
+
+`;
+
+      const fnNext = src.replace(fnOriginal, "");
+
+      if (fnNext !== src) {
+        console.log(
+          "[patch] removed createX25519PublicKey in",
+          path.relative(bridgeDir, filePath),
+        );
+
+        src = fnNext;
+      }
+    }
+
+    {
+      // Drop the now-unused SPKI prefix constant.
+
+      const constOriginal = `const x25519SpkiPrefix = Buffer.from('302a300506032b656e032100', 'hex')\n`;
+
+      const constNext = src.replace(constOriginal, "");
+
+      if (constNext !== src) {
+        console.log(
+          "[patch] removed x25519SpkiPrefix in",
+          path.relative(bridgeDir, filePath),
+        );
+
+        src = constNext;
+      }
+    }
+
+    {
+      // Rewrite xeapiEncryptS to use noble.
+
+      const fnOriginal = `const xeapiEncryptS = (dynamicKey, publicKeyState, os) => {
+  const peerRaw = Buffer.from(publicKeyState.publicKey, 'base64')
+  const peerKey = createX25519PublicKey(peerRaw)
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('x25519')
+  const ephemeralRaw = Buffer.from(
+    publicKey.export({ format: 'der', type: 'spki' }),
+  ).subarray(-32)
+  const sharedSecret = crypto.diffieHellman({
+    privateKey,
+    publicKey: peerKey,
+  })
+  const aesKey = deriveX25519AesKey(sharedSecret, ephemeralRaw)
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, iv)
+  const plaintext = Buffer.from(
+    \`\${dynamicKey.toString('base64')}|\${os}|\${publicKeyState.sk || ''}\`,
+  )
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()])
+  return Buffer.concat([ephemeralRaw, iv, encrypted, cipher.getAuthTag()])
+}`;
+
+      const fnReplacement = `const xeapiEncryptS = (dynamicKey, publicKeyState, os) => {
+  // PATCHED FOR BARE: bare-crypto cannot do X25519 or AES-GCM-with-tag
+  // separation. Replaced with @noble/curves (X25519, RFC 7748) and
+  // @noble/ciphers (AES-128-GCM). Wire format is identical to the
+  // upstream Node + OpenSSL implementation.
+  const peerRaw = Buffer.from(publicKeyState.publicKey, 'base64')
+  const ephemeralSecret = x25519.utils.randomSecretKey()
+  const ephemeralRaw = x25519.getPublicKey(ephemeralSecret)
+  const sharedSecret = x25519.getSharedSecret(ephemeralSecret, peerRaw)
+  const aesKey = deriveX25519AesKey(Buffer.from(sharedSecret), ephemeralRaw)
+  const iv = crypto.randomBytes(12)
+  const plaintext = Buffer.from(
+    \`\${dynamicKey.toString('base64')}|\${os}|\${publicKeyState.sk || ''}\`,
+  )
+  // Noble's gcm().encrypt appends the 16-byte auth tag to the
+  // ciphertext in one Uint8Array; the upstream Node API returned them
+  // separately as Buffer.concat([update()+final(), getAuthTag()]). The
+  // concatenation order is the same (ciphertext then tag), so we split
+  // it back out to keep the on-wire format identical.
+  const sealed = gcm(aesKey, iv).encrypt(plaintext)
+  return Buffer.concat([
+    Buffer.from(ephemeralRaw),
+    iv,
+    Buffer.from(sealed.subarray(0, sealed.length - 16)),
+    Buffer.from(sealed.subarray(sealed.length - 16)),
+  ])
+}`;
+
+      const fnNext = src.replace(fnOriginal, fnReplacement);
+
+      if (fnNext !== src) {
+        console.log(
+          "[patch] rewrote xeapiEncryptS to use noble in",
+          path.relative(bridgeDir, filePath),
+        );
+
+        src = fnNext;
+      }
+    }
   }
 
   // ------------------------------------------------------------
