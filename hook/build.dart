@@ -58,15 +58,8 @@
 
 import 'dart:io';
 
-import 'package:archive/archive.dart';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
-
-const _bareKitVersion = 'v2.4.3';
-
-const _bareKitPrebuildsUrl =
-    'https://github.com/holepunchto/bare-kit/releases/download/'
-    '$_bareKitVersion/prebuilds.zip';
 
 const _androidAbis = <String, String>{
   'arm64-v8a': 'android-arm64',
@@ -121,65 +114,26 @@ Future<void> main(List<String> args) async {
     }
 
     //
-    // Download classes.jar (the bare-kit Java API) once. This is
-    // placed into android/libs/ where android/build.gradle picks
-    // it up as an implementation dependency.
-    //
-
-    final sharedDir = Directory.fromUri(input.outputDirectoryShared);
-
-    await sharedDir.create(recursive: true);
-
-    final prebuildRoot = Directory.fromUri(
-      sharedDir.uri.resolve('bare-kit-$_bareKitVersion/'),
-    );
-
-    await prebuildRoot.create(recursive: true);
-
-    final zipFile = File('${prebuildRoot.path}/prebuilds.zip');
-
-    if (!await zipFile.exists()) {
-      print('ncm_api_enhanced: downloading $_bareKitPrebuildsUrl');
-      await _downloadFile(Uri.parse(_bareKitPrebuildsUrl), zipFile);
-    }
-
-    final pluginAndroidRoot =
-        Directory('${packageRoot.path}/android');
-
-    final pluginLibsDir =
-        Directory('${pluginAndroidRoot.path}/libs');
-
-    final classesJarFile = File(
-      '${pluginLibsDir.path}/bare-kit-classes.jar',
-    );
-
-    if (!await classesJarFile.exists()) {
-      await pluginLibsDir.create(recursive: true);
-
-      await _extractClassesJar(
-        archivePath: zipFile.path,
-        classesJarDestination: classesJarFile,
-      );
-    }
-
-    if (!await classesJarFile.exists()) {
-      throw StateError(
-        'ncm_api_enhanced: failed to obtain classes.jar '
-        'from $_bareKitPrebuildsUrl',
-      );
-    }
-
-    print('ncm_api_enhanced: bare-kit classes.jar: ${classesJarFile.path}');
-
-    //
     // Run bare-link for every Android ABI so that
     // android/addons/<abi>/lib<name>.<version>.so exists on disk
     // before any developer runs `flutter build apk`. The plugin
-    // module's Gradle task will re-run bare-link at build time if
+    // module's Gradle task (downloadAndPackageAddons in
+    // android/build.gradle) will re-run bare-link at build time if
     // a developer runs `git clean` between `flutter pub get` and
-    // `flutter build apk`, but the typical flow relies on this
-    // hook having populated the tree.
+    // `flutter build apk`, but the typical flow relies on this hook
+    // having populated the tree.
     //
+    // We do NOT download libbare-kit.so or classes.jar here.
+    // bare_flutter (https://pub.dev/packages/bare_flutter) takes care
+    // of both — its Gradle integration downloads
+    // `bare-kit-v2.4.3-prebuilds.zip` and exposes libbare-kit.so +
+    // classes.jar through its own plugin module's jniLibs + jar
+    // dependencies. We only fill the gap that bare_flutter leaves:
+    // the 100+ `bare-*` addon .so files.
+    //
+
+    final pluginAndroidRoot =
+        Directory('${packageRoot.path}/android');
 
     for (final entry in _androidAbis.entries) {
       final abi = entry.key;
@@ -278,57 +232,6 @@ Future<void> _runBareLink({
 }
 
 // ===========================================================================
-// Extract classes.jar from prebuilds.zip
-// ===========================================================================
-
-Future<void> _extractClassesJar({
-  required String archivePath,
-  required File classesJarDestination,
-}) async {
-  print('ncm_api_enhanced: extracting classes.jar from prebuilds.zip');
-
-  //
-  // prebuilds.zip layout:
-  //
-  //   prebuilds/android/bare-kit/classes.jar
-  //
-  // We use the `archive` package's pure-Dart zip reader so this
-  // works on every OS without depending on a system `unzip` binary.
-  //
-
-  final bytes = await File(archivePath).readAsBytes();
-
-  final archive = ZipDecoder().decodeBytes(bytes, verify: true);
-
-  ArchiveFile? jarEntry;
-
-  for (final file in archive.files) {
-    final normalized = file.name.replaceAll('\\', '/');
-
-    if (normalized == 'prebuilds/android/bare-kit/classes.jar') {
-      jarEntry = file;
-      break;
-    }
-  }
-
-  if (jarEntry == null) {
-    throw StateError(
-      'ncm_api_enhanced: prebuilds/android/bare-kit/classes.jar was not '
-      'found in $_bareKitPrebuildsUrl',
-    );
-  }
-
-  await classesJarDestination.parent.create(recursive: true);
-
-  await classesJarDestination.writeAsBytes(
-    jarEntry.content as List<int>,
-    flush: true,
-  );
-
-  print('ncm_api_enhanced: extracted ${classesJarDestination.path}');
-}
-
-// ===========================================================================
 // Android ABI mapping
 // ===========================================================================
 
@@ -345,54 +248,6 @@ String? _androidAbi(Architecture architecture) {
 
     default:
       return null;
-  }
-}
-
-// ===========================================================================
-// HTTP download
-// ===========================================================================
-
-Future<void> _downloadFile(Uri url, File destination) async {
-  final temp = File('${destination.path}.download');
-
-  if (await temp.exists()) {
-    await temp.delete();
-  }
-
-  final client = HttpClient();
-
-  try {
-    client.userAgent =
-        'ncm_api_enhanced/bare-kit-$_bareKitVersion '
-        '(Dart build hook)';
-
-    final request = await client.getUrl(url);
-
-    request.followRedirects = true;
-    request.maxRedirects = 8;
-
-    final response = await request.close();
-
-    if (response.statusCode != HttpStatus.ok) {
-      await response.drain();
-
-      throw HttpException(
-        'HTTP ${response.statusCode} while downloading $url',
-      );
-    }
-
-    final sink = temp.openWrite();
-
-    try {
-      await response.pipe(sink);
-    } catch (_) {
-      await sink.close();
-      rethrow;
-    }
-
-    await temp.rename(destination.path);
-  } finally {
-    client.close(force: true);
   }
 }
 

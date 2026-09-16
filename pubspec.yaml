@@ -25,8 +25,7 @@ dependencies:
   # Hook dependencies. The Dart SDK treats anything imported from
   # hook/ as a runtime dependency, even though the hook only runs
   # at build time. None of these end up in the consumer's app binary.
-  archive: 
-  code_assets: 
+  code_assets:
   hooks:
 
 dev_dependencies:

@@ -475,15 +475,12 @@ dependencies {
     //     IPC classes
     //     ...
     //
-    // This JAR is produced by hook/build.dart and extracted into:
-    //
-    //     android/libs/bare-kit-classes.jar
-    //
-
-    implementation files(
-        "libs/bare-kit-classes.jar"
-    )
-
+    // libbare-kit.so + classes.jar are both provided by the
+    // bare_flutter plugin (https://pub.dev/packages/bare_flutter).
+    // bare_flutter's Gradle integration downloads
+    // bare-kit-v2.4.3-prebuilds.zip and exposes both through its
+    // own plugin module's jniLibs + jar dependencies. We do not
+    // redeclare them here.
     //
     // Flutter embedding (FlutterPlugin, MethodChannel, …) is
     // provided transitively by the host Flutter application once
