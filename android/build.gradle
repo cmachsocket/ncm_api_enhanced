@@ -5,7 +5,7 @@
 // Responsibilities
 // ----------------
 //
-// This module ONLY consumes pre-generated Bare addon JARs.
+// This module ONLY consumes pre-generated Bare addon artifacts.
 //
 // Pre-build preparation:
 //
@@ -25,10 +25,10 @@
 //
 // Android build:
 //
-//   android/addons-jars/*.jar
+//   android/addons-jars/arm64-v8a.jar
 //       |
 //       v
-//   Gradle dependency
+//   Gradle extracts JNI libraries
 //       |
 //       v
 //   AAR / APK
@@ -54,19 +54,13 @@
 //     - download Bare addons
 //     - provide libbare-kit.so
 //
-// The addon JARs must already exist when this Android plugin is built.
+// The addon JAR must already exist when this Android plugin is built.
 //
-// Expected files:
+// Supported Android ABI:
 //
-//   android/addons-jars/
-//       arm64-v8a.jar
-//       armeabi-v7a.jar
-//       x86_64.jar
-//       x86.jar
+//   arm64-v8a
 //
-// Each JAR contains:
-//
-//   lib/<abi>/libbare-*.so
+// "ARMv8" here means Android's arm64-v8a ABI.
 //
 // libbare-kit.so is owned entirely by bare_flutter.
 //
@@ -94,18 +88,28 @@ android {
     sourceSets {
         main {
             java.srcDirs += "src/main/java"
+
+            //
+            // Native Bare addons extracted from the pre-generated JAR.
+            //
+            jniLibs.srcDir(
+                "${buildDir}/generated/jniLibs"
+            )
         }
     }
 }
 
 //
 // --------------------------------------------------------------------------
-// Pre-generated Bare addon JARs
+// Pre-generated Bare addon JAR
 // --------------------------------------------------------------------------
 //
-// These files are part of the package and MUST already exist.
+// This file is a package artifact.
 //
-// Do not generate them from Gradle.
+// It MUST already exist before Gradle starts the Android build.
+//
+// Gradle only extracts the native libraries from it.
+// It does NOT generate or link the addons.
 //
 // --------------------------------------------------------------------------
 //
@@ -114,26 +118,37 @@ def addonsJarsDir = file(
     "${projectDir}/addons-jars"
 )
 
-def addonJarNames = [
-    "arm64-v8a.jar",
-    "armeabi-v7a.jar",
-    "x86_64.jar",
-    "x86.jar",
-]
+def addonJar = file(
+    "${addonsJarsDir}/arm64-v8a.jar"
+)
+
+//
+// Extracted JNI directory:
+//
+//   build/generated/jniLibs/
+//       arm64-v8a/
+//           libbare-*.so
+//
+// --------------------------------------------------------------------------
+//
+
+def extractedJniLibsDir = file(
+    "${buildDir}/generated/jniLibs"
+)
 
 //
 // --------------------------------------------------------------------------
-// Validate pre-generated artifacts
+// Validate pre-generated artifact
 // --------------------------------------------------------------------------
 //
 
-def validateAddonJars = tasks.register(
-    "validateAddonJars"
+def validateAddonJar = tasks.register(
+    "validateAddonJar"
 ) {
     group = "ncm-api-enhanced"
 
     description =
-        "Validates pre-generated Bare Android addon JARs."
+        "Validates the pre-generated Bare Android ARM64 addon JAR."
 
     doLast {
 
@@ -141,53 +156,33 @@ def validateAddonJars = tasks.register(
             throw new RuntimeException(
                 "ncm_api_enhanced: addon JAR directory does not exist:\n" +
                 "  ${addonsJarsDir.absolutePath}\n\n" +
-                "Expected pre-generated Android addon JARs."
+                "Expected:\n" +
+                "  android/addons-jars/arm64-v8a.jar"
             )
         }
 
-        def missing = []
-
-        addonJarNames.each { name ->
-            def jar = file(
-                "${addonsJarsDir}/${name}"
-            )
-
-            if (!jar.exists()) {
-                missing << name
-            } else if (jar.length() == 0) {
-                throw new RuntimeException(
-                    "ncm_api_enhanced: addon JAR is empty:\n" +
-                    "  ${jar.absolutePath}"
-                )
-            }
-        }
-
-        if (!missing.isEmpty()) {
+        if (!addonJar.exists()) {
             throw new RuntimeException(
-                "ncm_api_enhanced: missing pre-generated Android " +
-                "addon JAR(s):\n" +
-                missing.collect {
-                    "  android/addons-jars/${it}"
-                }.join("\n") +
-                "\n\nThese files must be generated before the Flutter/Gradle build."
+                "ncm_api_enhanced: missing pre-generated Android addon JAR:\n" +
+                "  ${addonJar.absolutePath}\n\n" +
+                "Generate it before the Flutter/Gradle build."
+            )
+        }
+
+        if (addonJar.length() == 0) {
+            throw new RuntimeException(
+                "ncm_api_enhanced: addon JAR is empty:\n" +
+                "  ${addonJar.absolutePath}"
             )
         }
 
         println ""
         println "============================================================"
-        println " ncm-api-enhanced: pre-generated Bare addon JARs"
+        println " ncm-api-enhanced: pre-generated Bare addon"
         println "============================================================"
-
-        addonJarNames.each { name ->
-            def jar = file(
-                "${addonsJarsDir}/${name}"
-            )
-
-            println(
-                "  ${name} (${jar.length()} bytes)"
-            )
-        }
-
+        println "  ABI : arm64-v8a"
+        println "  JAR : ${addonJar.absolutePath}"
+        println "  Size: ${addonJar.length()} bytes"
         println "============================================================"
         println ""
     }
@@ -195,45 +190,105 @@ def validateAddonJars = tasks.register(
 
 //
 // --------------------------------------------------------------------------
+// Extract JNI libraries from the pre-generated JAR
+// --------------------------------------------------------------------------
+//
+// The JAR is a ZIP archive:
+//
+//   lib/arm64-v8a/libbare-foo.so
+//   lib/arm64-v8a/libbare-bar.so
+//
+// Android's jniLibs source set expects:
+//
+//   <jniLibsDir>/arm64-v8a/libbare-foo.so
+//
+// Therefore we extract ONLY the native libraries.
+//
+// This is NOT addon generation.
+// It is simply Gradle's consumption of the already-generated artifact.
+//
+// --------------------------------------------------------------------------
+//
+
+def extractAddonJniLibs = tasks.register(
+    "extractAddonJniLibs",
+    Sync
+) {
+    group = "ncm-api-enhanced"
+
+    description =
+        "Extracts pre-generated Bare ARM64 addon JNI libraries."
+
+    dependsOn(validateAddonJar)
+
+    from {
+        zipTree(addonJar)
+    }
+
+    include(
+        "lib/arm64-v8a/*.so"
+    )
+
+    //
+    // Remove the leading "lib/" directory.
+    //
+    eachFile {
+        path = path.substring(
+            "lib/".length()
+        )
+    }
+
+    includeEmptyDirs = false
+
+    into(extractedJniLibsDir)
+}
+
+//
+// --------------------------------------------------------------------------
 // Dependencies
 // --------------------------------------------------------------------------
 //
-// The addon JARs are ordinary Gradle dependencies.
+// Do NOT use:
 //
-// There is deliberately NO .builtBy() relationship.
+//   implementation(fileTree(...))
 //
-// Why:
+// because that treats the JAR as a normal Java dependency and does not
+// establish the JAR's embedded .so files as Android JNI libraries.
 //
-// These files are pre-generated package artifacts, not Gradle outputs.
+// The native .so files are consumed through sourceSets.main.jniLibs.
 //
 // --------------------------------------------------------------------------
 //
 
 dependencies {
-
-    implementation(
-        fileTree(
-            dir: addonsJarsDir,
-            include: "*.jar"
-        )
-    )
+    //
+    // Deliberately no addon JAR implementation dependency.
+    //
+    // The JAR is an input artifact for extractAddonJniLibs.
+    //
 }
 
 //
 // --------------------------------------------------------------------------
-// Make validation happen before Android compilation.
+// Build ordering
+// --------------------------------------------------------------------------
 //
-// No generation occurs here.
+// Validation -> extraction -> Android native packaging.
+//
+// No Node.
+// No bare-pack.
+// No bare-link.
+// No addon generation.
 //
 // --------------------------------------------------------------------------
 //
 
 tasks.named("preBuild") {
-    dependsOn(validateAddonJars)
+    dependsOn(extractAddonJniLibs)
 }
 
 tasks.named("assemble") {
-    dependsOn(validateAddonJars)
+    dependsOn(extractAddonJniLibs)
 }
 
 //
