@@ -73,7 +73,7 @@ group = "to.holepunch"
 
 android {
     namespace = "to.holepunch.ncm_enhanced"
-    compileSdk 34
+    compileSdk 36
 
     defaultConfig {
         minSdk 31
