@@ -1,0 +1,497 @@
+// android/build.gradle
+//
+// Android plugin module for ncm_api_enhanced.
+//
+// Purpose
+// -------
+//
+// The bridge bundle (`assets/bridge/dist/ncm.bundle`) reaches 100+
+// Bare runtime addons via `require.addon()`:
+//
+//   linked:libbare-type.1.1.1.so
+//   linked:libbare-fs.4.8.1.so
+//   linked:libbare-crypto.1.15.3.so
+//   …
+//
+// bare-pack writes these as `linked:` URLs into the bundle; the bare
+// runtime resolves them through `Bare.Addon.load`, which on Android
+// dispatches to `System.loadLibrary("<name>")`. The matching .so
+// file must therefore exist in the APK at `lib/<abi>/`.
+//
+// bare_flutter (the upstream Flutter plugin wrapping bare-kit) takes
+// care of `libbare-kit.so` itself but does NOT link the
+// 100+ `bare-*` addons. This module fills that gap.
+//
+// How it works
+// ------------
+//
+// 1. `downloadAndPackageAddons` runs the host's `node` to execute
+//    `assets/bridge/pack.mjs` for each ABI. pack.mjs in turn runs
+//    `bare-link` against the bridge module graph and writes the
+//    prebuilt `.so` files into `android/addons/<abi>/`.
+//
+// 2. The generated `.so` files are packaged into a `.jar` per ABI
+//    whose internal layout matches AGP's expected convention:
+//
+//       lib/<abi>/lib<name>.<version>.so
+//
+// 3. The generated JARs are wired into the implementation classpath,
+//    allowing AGP to package the native libraries into the APK.
+//
+// 4. `preBuild` and `assemble` depend on
+//    `downloadAndPackageAddons`.
+//
+// Why node + pack.mjs
+// -------------------
+//
+// pack.mjs is the same script developers run by hand from a
+// terminal to build ncm.bundle. Driving it from Gradle via node
+// avoids embedding bare-link logic in two places.
+//
+// The script's contract with Gradle is:
+//
+//   - takes HOST=android-<arch> via env
+//   - writes android/addons/<arch>/lib<name>.<ver>.so
+//
+// We invoke pack.mjs with each HOST in the matrix below and let
+// bare-link discover every bare-* addon reachable from the
+// bridge module graph.
+//
+// Why ProcessBuilder
+// ------------------
+//
+// We intentionally invoke Node through Java's ProcessBuilder rather
+// than Gradle's Exec API. This avoids ExecSpec / Exec DSL compatibility
+// issues while keeping the existing pack.mjs workflow unchanged.
+//
+
+plugins {
+    id "com.android.library"
+}
+
+group = "to.holepunch"
+
+android {
+    namespace = "to.holepunch.ncm_enhanced"
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 29
+        targetSdk 34
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs += "src/main/java"
+        }
+    }
+}
+
+//
+// ABI matrix. arm64-v8a covers ~all physical Android devices in
+// 2026; x86_64 covers emulators; armeabi-v7a and x86 cover older
+// hardware. Adjust here when targeting new ABIs.
+//
+
+ext.targetAbis = [
+    "arm64-v8a",
+    "armeabi-v7a",
+    "x86_64",
+    "x86"
+]
+
+//
+// Find the package's assets/bridge/ directory. We resolve it
+// relative to this build.gradle (which lives at <pkg>/android/).
+//
+
+ext.bridgeDir = file(
+    "${projectDir}/../assets/bridge"
+).absolutePath
+
+ext.hostBin = [
+    "arm64-v8a"  : "android-arm64",
+    "armeabi-v7a": "android-arm",
+    "x86_64"     : "android-x64",
+    "x86"        : "android-ia32",
+]
+
+//
+// Node executable resolution.
+//
+// Flutter does not ship node, but most developers have it on PATH.
+//
+// If node is not available through PATH, set:
+//
+//     NCM_NODE=/absolute/path/to/node
+//
+// We resolve this at task execution time.
+//
+
+ext.ncmNodePath = {
+    def env = System.getenv("NCM_NODE")
+
+    if (env != null && !env.trim().isEmpty()) {
+        return env.trim()
+    }
+
+    return "node"
+}
+
+//
+// downloadAndPackageAddons
+//
+// Runs pack.mjs for every Android ABI and packages the resulting
+// native addon libraries into AGP-compatible JAR files.
+//
+
+def downloadAndPackageAddons = tasks.register(
+    "downloadAndPackageAddons"
+) {
+    group = "ncm-api-enhanced"
+
+    description =
+        "Downloads every bare-* addon's prebuilt .so via pack.mjs + bare-link, packages them as AGP-friendly jars."
+
+    inputs.dir(
+        "${projectDir}/../assets/bridge"
+    )
+
+    outputs.dir(
+        "${buildDir}/addons"
+    )
+
+    doLast {
+        def outDir = file(
+            "${buildDir}/addons"
+        )
+
+        outDir.deleteDir()
+        outDir.mkdirs()
+
+        //
+        // Resolve Node only when the task actually executes.
+        //
+        def nodeExecutable = ncmNodePath()
+
+        println ""
+        println "============================================================"
+        println " ncm-api-enhanced: building Bare Android addons"
+        println " Node: ${nodeExecutable}"
+        println " Bridge: ${bridgeDir}"
+        println "============================================================"
+        println ""
+
+        targetAbis.each { abi ->
+
+            def host = hostBin[abi]
+
+            if (host == null) {
+                throw new GradleException(
+                    "No bare-link host mapping for ABI ${abi}"
+                )
+            }
+
+            println ""
+            println "------------------------------------------------------------"
+            println " ABI : ${abi}"
+            println " HOST: ${host}"
+            println "------------------------------------------------------------"
+
+            //
+            // Run pack.mjs for this ABI. pack.mjs invokes bare-link
+            // and writes the prebuilt .so files into:
+            //
+            //     android/addons/<abi>/
+            //
+            def packScript = file(
+                "${bridgeDir}/pack.mjs"
+            )
+
+            if (!packScript.exists()) {
+                throw new GradleException(
+                    "pack.mjs not found at ${packScript}. " +
+                    "Did you run 'flutter pub get' from the host app?"
+                )
+            }
+
+            //
+            // pack.mjs is run from assets/bridge/..
+            //
+            def workingDir = file(
+                "${bridgeDir}/.."
+            )
+
+            //
+            // Run Node directly through ProcessBuilder.
+            //
+            def pb = new ProcessBuilder(
+                nodeExecutable,
+                packScript.absolutePath
+            )
+
+            pb.directory(workingDir)
+
+            //
+            // Pass the Bare target through the environment.
+            //
+            pb.environment()["HOST"] = host
+
+            //
+            // Merge stderr into stdout so that all output is
+            // available in the Gradle log.
+            //
+            pb.redirectErrorStream(true)
+
+            println ""
+            println "Running:"
+            println "  ${nodeExecutable} ${packScript.absolutePath}"
+            println ""
+
+            def process
+
+            try {
+                process = pb.start()
+            } catch (IOException e) {
+                throw new GradleException(
+                    "Unable to start Node executable '${nodeExecutable}'. " +
+                    "Set NCM_NODE to an absolute Node path if necessary.",
+                    e
+                )
+            }
+
+            //
+            // Capture pack.mjs output.
+            //
+            def output = process.inputStream.getText("UTF-8")
+
+            //
+            // Wait until pack.mjs exits.
+            //
+            def exitCode = process.waitFor()
+
+            if (!output.trim().isEmpty()) {
+                println output
+            }
+
+            if (exitCode != 0) {
+                println(
+                    "ncm-api-enhanced: pack.mjs failed for " +
+                    "${abi} (exit=${exitCode})"
+                )
+
+                throw new GradleException(
+                    "pack.mjs failed for ABI ${abi}; see output above"
+                )
+            } else {
+                println(
+                    "ncm-api-enhanced: pack.mjs finished for ${abi}"
+                )
+            }
+
+            //
+            // Pack every .so under android/addons/<abi>/ into a
+            // single jar at:
+            //
+            //     $buildDir/addons/<abi>.jar
+            //
+            // with the layout:
+            //
+            //     lib/<abi>/lib<name>.<version>.so
+            //
+            def srcDir = file(
+                "${projectDir}/addons/${abi}"
+            )
+
+            if (
+                !srcDir.exists() ||
+                srcDir.listFiles() == null ||
+                srcDir.listFiles().length == 0
+            ) {
+                throw new GradleException(
+                    "No addons built for ${abi}. pack.mjs did not " +
+                    "produce android/addons/${abi}/lib<name>.<ver>.so. " +
+                    "Run 'cd assets/bridge && node pack.mjs' manually to debug."
+                )
+            }
+
+            //
+            // Only package .so files.
+            //
+            def soFiles = srcDir.listFiles().findAll {
+                it.isFile() && it.name.endsWith(".so")
+            }
+
+            if (soFiles.isEmpty()) {
+                throw new GradleException(
+                    "No .so files found under ${srcDir}"
+                )
+            }
+
+            println(
+                "ncm-api-enhanced: found " +
+                "${soFiles.size()} addon(s) for ${abi}"
+            )
+
+            //
+            // Output JAR.
+            //
+            def jarFile = file(
+                "${buildDir}/addons/${abi}.jar"
+            )
+
+            //
+            // Temporary staging directory.
+            //
+            def stageDir = file(
+                "${buildDir}/stage/${abi}"
+            )
+
+            stageDir.deleteDir()
+            stageDir.mkdirs()
+
+            //
+            // Stage the native libraries into the layout expected
+            // by Android Gradle Plugin:
+            //
+            //     lib/<abi>/<library>.so
+            //
+            soFiles.each { so ->
+
+                def staged = file(
+                    "${stageDir}/lib/${abi}/${so.name}"
+                )
+
+                staged.parentFile.mkdirs()
+
+                //
+                // Copy instead of rename so that the generated addon
+                // remains intact until the JAR has been successfully
+                // created.
+                //
+                ant.copy(
+                    file: so.absolutePath,
+                    tofile: staged.absolutePath,
+                    overwrite: true
+                )
+            }
+
+            //
+            // Create the JAR.
+            //
+            ant.jar(
+                destfile: jarFile.absolutePath,
+                basedir: stageDir.absolutePath
+            )
+
+            println ""
+            println "ncm-api-enhanced: created ${jarFile}"
+
+            //
+            // Clean the source .so files out of the package directory.
+            //
+            // pack.mjs will regenerate them during the next build.
+            //
+            srcDir.deleteDir()
+
+            //
+            // The staging directory is no longer needed after the
+            // JAR has been created.
+            //
+            stageDir.deleteDir()
+
+            println(
+                "ncm-api-enhanced: cleaned temporary files for ${abi}"
+            )
+        }
+
+        println ""
+        println "============================================================"
+        println " ncm-api-enhanced: all Android addons packaged successfully"
+        println " Output: ${outDir}"
+        println "============================================================"
+        println ""
+    }
+}
+
+//
+// Make every build chain trigger addon generation.
+//
+// preBuild catches IDE-driven builds.
+//
+// assemble catches direct Gradle assemble invocations.
+//
+
+tasks.named("preBuild") {
+    dependsOn(downloadAndPackageAddons)
+}
+
+tasks.named("assemble") {
+    dependsOn(downloadAndPackageAddons)
+}
+
+//
+// Kotlin compiler options under the built-in Kotlin model.
+//
+// The plugin currently does not produce Kotlin sources, but the
+// block is required for hosts that enable built-in Kotlin.
+//
+
+kotlin {
+    compilerOptions {
+        jvmTarget = JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+
+    //
+    // Wire every <abi>.jar produced by downloadAndPackageAddons
+    // into the implementation configuration.
+    //
+    // Each JAR contains:
+    //
+    //     lib/<abi>/*.so
+    //
+    // allowing AGP to package the native libraries into the APK.
+    //
+
+    implementation(
+        fileTree(
+            dir: "${buildDir}/addons",
+            include: "*.jar"
+        ).builtBy(downloadAndPackageAddons)
+    )
+
+    //
+    // The bare-kit Java API:
+    //
+    //     to.holepunch.bare.kit.Worklet
+    //     IPC classes
+    //     ...
+    //
+    // This JAR is produced by hook/build.dart and extracted into:
+    //
+    //     android/libs/bare-kit-classes.jar
+    //
+
+    implementation files(
+        "libs/bare-kit-classes.jar"
+    )
+
+    //
+    // Flutter embedding (FlutterPlugin, MethodChannel, …) is
+    // provided transitively by the host Flutter application once
+    // the Flutter Gradle Plugin has been applied.
+    //
+    // Do NOT declare:
+    //
+    //     io.flutter:flutter_embedding
+    //
+    // as a Maven dependency.
+}

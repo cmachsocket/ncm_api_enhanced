@@ -79,9 +79,17 @@ flutter:
     - path: assets/runtime/win-arm64/node.exe
       platforms:
         - windows
-  # bare_flutter provides the Android and iOS platform
-  # implementations of this package. Both sides declare their own
-  # pluginClass (BareFlutterPlugin); we don't redeclare them here.
-  # Android/iOS apps get bare-kit worklet hosting for free through
-  # bare_flutter; desktop platforms ignore the plugin and spawn the
-  # system `node` binary via Process in lib/src/desktop_bridge.dart.
+  # bare_flutter provides the Worklet hosting for Android / iOS.
+  # We add a parallel native plugin module under android/ whose only
+  # job is to register a Gradle task that downloads the 100+ bare-*
+  # addon .so files via pack.mjs (running bare-link) and packages
+  # them into jars AGP auto-extracts into the APK's jniLibs. The
+  # two plugins complement each other: bare_flutter provides the
+  # Bare runtime (libbare-kit.so) and the IPC channel; our module
+  # provides the transitive native addons the bridge bundle needs
+  # (libbare-type, libbare-fs, libbare-crypto, …).
+  plugin:
+    platforms:
+      android:
+        package: to.holepunch.ncm_enhanced
+        pluginClass: AddonLinker

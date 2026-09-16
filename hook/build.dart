@@ -1,8 +1,10 @@
 // hook/build.dart
 //
-// Build hook: extract bare-kit's classes.jar + every bare-* addon's
-// prebuilt .so into android/addons/<abi>/, where the host app's
-// Gradle build picks them up as jniLibs.
+// Build hook: at `flutter pub get` time, run `bare-link` against
+// every bare-* addon reachable from the bridge module graph and
+// copy the prebuilt .so files into android/addons/<abi>/. The
+// Android plugin module (android/build.gradle) then packages those
+// .so files into jars AGP auto-extracts into the APK's jniLibs.
 //
 // Why this hook exists
 // --------------------
@@ -28,65 +30,31 @@
 //
 // bare-link is the upstream helper that walks every bare-* addon
 // in the bridge module graph and writes their prebuilt .so files
-// into a single directory. We run it here and put the output where
-// the host app's Gradle build will find it.
+// into a single directory. We invoke it from here so that the
+// prebuilt files exist on disk before the host app's first Gradle
+// build runs.
 //
-// Host-side wiring
-// ----------------
+// After this hook runs, android/addons/<abi>/lib<name>.<version>.so
+// is on disk for every supported ABI. The plugin module's
+// downloadAndPackageAddons Gradle task then re-runs bare-link at
+// build time (for environments where flutter pub get was skipped)
+// and packages the .so files into AGP-compatible jars.
 //
-// The host app's android/app/build.gradle must declare the addons
-// directory as a jniLibs source:
+// Why this hook runs `bare-link` even though the Gradle task does
+// -----------------------------------------------------------------
 //
-//   sourceSets.main.jniLibs.srcDirs += 'path/to/ncm_api_enhanced/android/addons'
+// `flutter pub get` happens once per dependency change; subsequent
+// `flutter build apk` runs do not re-run hooks. By writing the
+// addon .so files in the hook, every developer who runs
+// `flutter pub get` on a fresh checkout ends up with a complete
+// android/addons/ tree. If the developer later deletes the tree
+// (e.g. `git clean -fdx`) the Gradle task regenerates it.
 //
-// That single line pulls every libbare-*.so that pack.mjs has
-// linked into the host APK alongside libbare-kit.so (which
-// bare_flutter's Gradle integration handles separately).
-//
-// We do NOT inject this into the host app from here. Hook code
-// must not mutate the consumer's android/ tree; that is a build
-// recipe the consumer writes themselves. The README has a copy-
-// paste snippet.
-//
-// See pack.mjs in assets/bridge/ for the complementary step that
-// builds ncm.bundle and runs bare-link.
-//
-// platform output directories
-// ---------------------------
-//
-//   android/addons/<abi>/libbare-*.so
-//     Where bare-link writes every bare-* addon .so for one ABI.
-//     The host app merges this into its jniLibs.
-//
-// Layout inside bare-kit prebuilds.zip:
-//
-//   prebuilds/android/bare-kit/classes.jar   ← Java API
-//
-// We extract classes.jar into android/libs/ where
-// android/build.gradle's `implementation files(...)` picks it up.
-//
-// Why pack.mjs vs hook
-// --------------------
-//
-// pack.mjs is a one-shot script run by the developer from the
-// terminal:
-//
-//   cd assets/bridge
-//   node build.mjs     # → dist/bundle.js for desktop (esbuild)
-//   HOST=android-arm64 node pack.mjs   # → dist/ncm.bundle + android/addons/
-//
-// It runs bare-link as part of `node pack.mjs` and writes the .so
-// files into `android/addons/<abi>/`. The hook below is a *second*
-// code path that re-runs bare-link for any host app whose build
-// pipeline doesn't shell out to pack.mjs (the typical case for
-// consumers). The two paths are idempotent: re-running bare-link
-// overwrites the same files with the same content.
-//
-// Why both? Because the hook runs as part of `flutter pub get` —
-// before the consumer has even looked at the repo. The bare-*
-// addon .so files have to exist on disk at the moment the host
-// app's Gradle build starts, and on a fresh checkout pack.mjs has
-// not run yet. The hook guarantees that.
+// We invoke bare-link by spawning node with the bare-link CLI that
+// ships inside assets/bridge/node_modules/.bin. assets/bridge/ is
+// always present because it's part of this package's pubspec
+// assets. The script path is resolved relative to this hook's
+// `packageRoot`.
 
 import 'dart:io';
 
@@ -99,6 +67,13 @@ const _bareKitVersion = 'v2.4.3';
 const _bareKitPrebuildsUrl =
     'https://github.com/holepunchto/bare-kit/releases/download/'
     '$_bareKitVersion/prebuilds.zip';
+
+const _androidAbis = <String, String>{
+  'arm64-v8a': 'android-arm64',
+  'armeabi-v7a': 'android-arm',
+  'x86_64': 'android-x64',
+  'x86': 'android-ia32',
+};
 
 Future<void> main(List<String> args) async {
   await build(args, (input, output) async {
@@ -122,25 +97,38 @@ Future<void> main(List<String> args) async {
     }
 
     print(
-      'ncm_api_enhanced: building bare-kit $_bareKitVersion '
+      'ncm_api_enhanced: preparing bare-kit + bare-* addons '
       'for Android $abi',
     );
 
     //
-    // Shared output directory.
+    // Locate the bridge source directory. This hook lives at
+    // <packageRoot>/hook/build.dart; assets/bridge/ sits at
+    // <packageRoot>/assets/bridge/. We rely on packageRoot being
+    // a file URI we can resolve.
+    //
+
+    final packageRoot = Directory.fromUri(input.packageRoot);
+
+    final bridgeDir = Directory('${packageRoot.path}/assets/bridge');
+
+    if (!await bridgeDir.exists()) {
+      throw StateError(
+        'ncm_api_enhanced: bridge source directory not found at '
+        '${bridgeDir.path}. The flutter pub get that triggered this '
+        'hook may have run in a stripped checkout.',
+      );
+    }
+
+    //
+    // Download classes.jar (the bare-kit Java API) once. This is
+    // placed into android/libs/ where android/build.gradle picks
+    // it up as an implementation dependency.
     //
 
     final sharedDir = Directory.fromUri(input.outputDirectoryShared);
 
     await sharedDir.create(recursive: true);
-
-    //
-    // Use Uri.resolve so a trailing slash on outputDirectoryShared.path
-    // does not turn into `//` in the final path. Older Flutter SDKs
-    // (pre-3.47) sometimes hand us a path with a trailing slash, and
-    // a naive `'${sharedDir.path}/...'` template produces broken
-    // paths.
-    //
 
     final prebuildRoot = Directory.fromUri(
       sharedDir.uri.resolve('bare-kit-$_bareKitVersion/'),
@@ -152,58 +140,161 @@ Future<void> main(List<String> args) async {
 
     if (!await zipFile.exists()) {
       print('ncm_api_enhanced: downloading $_bareKitPrebuildsUrl');
-
       await _downloadFile(Uri.parse(_bareKitPrebuildsUrl), zipFile);
     }
 
-    final expectedClassesJar = 'prebuilds/android/bare-kit/classes.jar';
+    final pluginAndroidRoot =
+        Directory('${packageRoot.path}/android');
 
-    final pluginAndroidRoot = Directory(
-      '${Directory.fromUri(input.packageRoot).path}/android',
-    );
-
-    final pluginLibsDir = Directory('${pluginAndroidRoot.path}/libs');
+    final pluginLibsDir =
+        Directory('${pluginAndroidRoot.path}/libs');
 
     final classesJarFile = File(
       '${pluginLibsDir.path}/bare-kit-classes.jar',
     );
 
     if (!await classesJarFile.exists()) {
-      await _extractAndroidArtifacts(
+      await pluginLibsDir.create(recursive: true);
+
+      await _extractClassesJar(
         archivePath: zipFile.path,
         classesJarDestination: classesJarFile,
-        expectedClassesJar: expectedClassesJar,
       );
     }
 
     if (!await classesJarFile.exists()) {
       throw StateError(
         'ncm_api_enhanced: failed to obtain classes.jar '
-        '(expected $expectedClassesJar in '
-        '$_bareKitPrebuildsUrl)',
+        'from $_bareKitPrebuildsUrl',
       );
     }
 
     print('ncm_api_enhanced: bare-kit classes.jar: ${classesJarFile.path}');
 
-    print(
-      'ncm_api_enhanced: bare_flutter handles libbare-kit.so; '
-      'host app must add android/addons to its jniLibs '
-      '— see README.md.',
-    );
+    //
+    // Run bare-link for every Android ABI so that
+    // android/addons/<abi>/lib<name>.<version>.so exists on disk
+    // before any developer runs `flutter build apk`. The plugin
+    // module's Gradle task will re-run bare-link at build time if
+    // a developer runs `git clean` between `flutter pub get` and
+    // `flutter build apk`, but the typical flow relies on this
+    // hook having populated the tree.
+    //
+
+    for (final entry in _androidAbis.entries) {
+      final abi = entry.key;
+      final host = entry.value;
+
+      await _runBareLink(
+        bridgeDir: bridgeDir,
+        pluginAndroidRoot: pluginAndroidRoot,
+        abi: abi,
+        host: host,
+      );
+    }
   });
+}
+
+// ===========================================================================
+// Run bare-link via the Node CLI bundled inside assets/bridge/node_modules
+// ===========================================================================
+
+Future<void> _runBareLink({
+  required Directory bridgeDir,
+  required Directory pluginAndroidRoot,
+  required String abi,
+  required String host,
+}) async {
+  final addonsDir = Directory('${pluginAndroidRoot.path}/addons/$abi');
+  await addonsDir.create(recursive: true);
+
+  //
+  // bare-link is per-package: it takes a single package root and
+  // walks the bare-* addons reachable from it. We enumerate every
+  // bare-* package under bridgeDir/node_modules/ and call bare-link
+  // once per package. Each call writes the package's prebuild .so
+  // (and any embedded .dex / .jar) into <out>/<abi>/.
+  //
+  // We invoke bare-link via its CLI shim under
+  // assets/bridge/node_modules/.bin/bare-link, which is the package
+  // npm-installed by the bridge dev dependencies (see
+  // assets/bridge/package.json devDependencies). The CLI takes:
+  //
+  //   bare-link <addon-path>
+  //              --host android-<arch>
+  //              --out  <out-dir>
+  //              --needs libbare-kit.so
+  //
+  // We use the bridge directory as the addon base path so the
+  // module walk starts from a real package root. bare-link then
+  // emits every bare-* prebuild it finds into <out-dir>/<arch>/.
+  //
+
+  final bareLinkBin = File(
+    '${bridgeDir.path}/node_modules/.bin/bare-link',
+  );
+
+  if (!await bareLinkBin.exists()) {
+    print(
+      'ncm_api_enhanced: bare-link not found at '
+      '${bareLinkBin.path}; skipping addon download for $abi. '
+      'Run "npm install" inside assets/bridge/ to install dev '
+      'dependencies, or rely on the Gradle task '
+      '(downloadAndPackageAddons) to do the work at build time.',
+    );
+    return;
+  }
+
+  print('ncm_api_enhanced: bare-link host=$host -> ${addonsDir.path}');
+
+  final result = await Process.run(
+    'node',
+    [
+      bareLinkBin.path,
+      bridgeDir.path,
+      '--host', host,
+      '--out', addonsDir.path,
+      '--needs', 'libbare-kit.so',
+    ],
+    workingDirectory: bridgeDir.path,
+  );
+
+  if (result.exitCode != 0) {
+    print(
+      'ncm_api_enhanced: bare-link FAILED for $abi '
+      '(exit=${result.exitCode})',
+    );
+    print(result.stdout);
+    print(result.stderr);
+    throw StateError(
+      'ncm_api_enhanced: bare-link failed for ABI $abi; see logs above',
+    );
+  }
+
+  print(
+    'ncm_api_enhanced: bare-link finished for $abi '
+    '(${result.stdout.split("\n").length} lines of output)',
+  );
 }
 
 // ===========================================================================
 // Extract classes.jar from prebuilds.zip
 // ===========================================================================
 
-Future<void> _extractAndroidArtifacts({
+Future<void> _extractClassesJar({
   required String archivePath,
   required File classesJarDestination,
-  required String expectedClassesJar,
 }) async {
-  print('ncm_api_enhanced: extracting $expectedClassesJar');
+  print('ncm_api_enhanced: extracting classes.jar from prebuilds.zip');
+
+  //
+  // prebuilds.zip layout:
+  //
+  //   prebuilds/android/bare-kit/classes.jar
+  //
+  // We use the `archive` package's pure-Dart zip reader so this
+  // works on every OS without depending on a system `unzip` binary.
+  //
 
   final bytes = await File(archivePath).readAsBytes();
 
@@ -214,7 +305,7 @@ Future<void> _extractAndroidArtifacts({
   for (final file in archive.files) {
     final normalized = file.name.replaceAll('\\', '/');
 
-    if (normalized == expectedClassesJar) {
+    if (normalized == 'prebuilds/android/bare-kit/classes.jar') {
       jarEntry = file;
       break;
     }
@@ -222,8 +313,8 @@ Future<void> _extractAndroidArtifacts({
 
   if (jarEntry == null) {
     throw StateError(
-      'ncm_api_enhanced: $expectedClassesJar was not found in '
-      '$_bareKitPrebuildsUrl',
+      'ncm_api_enhanced: prebuilds/android/bare-kit/classes.jar was not '
+      'found in $_bareKitPrebuildsUrl',
     );
   }
 
@@ -234,13 +325,11 @@ Future<void> _extractAndroidArtifacts({
     flush: true,
   );
 
-  print(
-    'ncm_api_enhanced: extracted ${classesJarDestination.path}',
-  );
+  print('ncm_api_enhanced: extracted ${classesJarDestination.path}');
 }
 
 // ===========================================================================
-// Android ABI
+// Android ABI mapping
 // ===========================================================================
 
 String? _androidAbi(Architecture architecture) {
@@ -306,3 +395,4 @@ Future<void> _downloadFile(Uri url, File destination) async {
     client.close(force: true);
   }
 }
+
