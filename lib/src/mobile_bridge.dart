@@ -51,7 +51,6 @@ import 'package:flutter/services.dart';
 import 'bridge.dart';
 import 'ndjson.dart';
 
-
 // ============================================================================
 // Mobile bridge
 // ============================================================================
@@ -129,17 +128,16 @@ class MobileNcmBridge implements NcmBridge {
 
     try {
       _log('START: loading ncm.bundle from assets');
-      final data = await rootBundle.load('assets/bridge/dist/ncm.bundle');
+      final data = await rootBundle.load(
+        'packages/ncm_api_enhanced/assets/bridge/dist/ncm.bundle',
+      );
 
       _log('START: bundle bytes=${data.lengthInBytes}');
 
       _log('START: starting BareWorklet');
       final worklet = await BareWorklet.start(
         filename: '/ncm.bundle',
-        source: data.buffer.asUint8List(
-          data.offsetInBytes,
-          data.lengthInBytes,
-        ),
+        source: data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
         options: BareWorkletOptions(memoryLimitBytes: 24 * 1024 * 1024),
       );
 
@@ -345,8 +343,12 @@ class MobileNcmBridge implements NcmBridge {
       await worklet.ipc.write(Uint8List.fromList(bytes));
     } catch (e, st) {
       _pending.take(id);
-      final error = BridgeError('native IPC write failed for "$method" '
-          '(id=$id)', e, st);
+      final error = BridgeError(
+        'native IPC write failed for "$method" '
+        '(id=$id)',
+        e,
+        st,
+      );
       _log(
         'CALL WRITE ERROR '
         'id=$id '
