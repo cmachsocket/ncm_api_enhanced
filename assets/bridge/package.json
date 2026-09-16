@@ -6,16 +6,15 @@
   "dependencies": {
     "@neteasecloudmusicapienhanced/api": "^4.40.1",
     "@noble/ciphers": "^2.0.0",
-    "@noble/curves": "^2.0.0"
-  },
-  "devDependencies": {
+    "@noble/curves": "^2.0.0",
     "bare-link": "^3.3.0",
     "bare-module-traverse": "^2.5.5",
     "bare-node-runtime": "^1.5.1",
-    "bare-pack": "^2.2.2",
-    "bare-run": "^0.0.3",
+    "bare-pack": "^2.2.2"
+  },
+  "devDependencies": {
     "esbuild": "^0.28.2",
-    "bare-module" : "6.0.1"
+    "bare-run": "^0.0.3"
   },
   "scripts": {
     "run": "bare-run dist/ncm.bundle"
