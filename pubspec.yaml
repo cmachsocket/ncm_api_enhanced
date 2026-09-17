@@ -22,6 +22,7 @@ dependencies:
   flutter:
     sdk: flutter
   bare_flutter:
+    git: https://github.com/cmachsocket/bare_flutter
   # Hook dependencies. The Dart SDK treats anything imported from
   # hook/ as a runtime dependency, even though the hook only runs
   # at build time. None of these end up in the consumer's app binary.
