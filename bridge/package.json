@@ -1,0 +1,21 @@
+{
+  "name": "ncm-bridge-builder",
+  "private": true,
+  "type": "module",
+  "description": "Build tool for ncm_api_enhanced mobile bundle (browser/QuickJS target). Not shipped to consumers; only used by maintainers running tool/refresh_bridge.sh or running `npm run build:browser` locally to regenerate assets/bridge/dist/bundle.browser.js.",
+  "scripts": {
+    "build:browser": "node build_browser.mjs",
+    "build:rollup": "node rollup.browser.config.mjs"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^29.0.3",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@stackline/rollup-plugin-polyfill-node": "^1.0.0",
+    "esbuild": "^0.24.0",
+    "esbuild-plugins-node-modules-polyfill": "^1.8.3",
+    "rollup": "^4.63.3",
+    "rollup-plugin-esbuild": "^6.2.1",
+    "rollup-plugin-replace": "^2.2.0"
+  }
+}
