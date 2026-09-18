@@ -6,9 +6,8 @@ description: >
   system `node` binary), Android (via libnode.so loaded by JNI), and
   iOS (via NodeMobile.xcframework embedded in the .app bundle).
 version: 0.1.0
-publish_to: none
-homepage: https://github.com/your-org/ncm_api_enhanced
-repository: https://github.com/your-org/ncm_api_enhanced
+homepage: https://github.com/cmachsocket/ncm_api_enhanced
+repository: https://github.com/cmachsocket/ncm_api_enhanced
 
 environment:
   sdk: ^3.10.0
@@ -27,13 +26,12 @@ dependencies:
   hooks: ^2.2.0
   http: ^1.5.0
   native_toolchain_c: ^0.19.4
-  ffi:
+  ffi: ^2.2.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-  asset_fill: 
 
 flutter:
   assets:
