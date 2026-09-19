@@ -3,10 +3,24 @@
   "version": "1.0.0",
   "private": true,
   "main": "bridge.js",
+  "description": "Bridge package for ncm_api_enhanced. Vendors @neteasecloudmusicapienhanced/api and provides build scripts for desktop + mobile (QuickJS) bundle targets.",
+  "scripts": {
+    "build:desktop": "node build.mjs",
+    "build:browser": "node build_browser.mjs",
+    "build:rollup":   "node build_rollup.mjs"
+  },
   "dependencies": {
     "@neteasecloudmusicapienhanced/api": "^4.40.1"
   },
   "devDependencies": {
-    "esbuild": "^0.28.2"
+    "@rollup/plugin-commonjs":            "^29.0.3",
+    "@rollup/plugin-json":                "^6.1.0",
+    "@rollup/plugin-node-resolve":        "^16.0.3",
+    "@stackline/rollup-plugin-polyfill-node": "^1.0.0",
+    "esbuild":                            "^0.28.2",
+    "esbuild-plugins-node-modules-polyfill": "^1.8.3",
+    "rollup":                             "^4.63.3",
+    "rollup-plugin-esbuild":              "^6.2.1",
+    "rollup-plugin-replace":              "^2.2.0"
   }
 }

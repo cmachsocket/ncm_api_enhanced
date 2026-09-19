@@ -35,7 +35,7 @@ import path from 'path';
 // dynamic import resolves the target module.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, '..');
+const root = __dirname;
 
 // Every node builtin in this map gets its REAL polyfill from
 // @jspm/core/nodelibs/<module> (browser-ready implementations of the
@@ -79,7 +79,7 @@ const overrideEventsPlugin = {
   name: 'override-events',
   setup(build) {
     build.onResolve({ filter: /^events$/ }, () => ({
-      path: path.join(root, 'assets', 'bridge', 'dist', 'polyfills', 'events.js'),
+      path: path.join(root, 'dist', 'polyfills', 'events.js'),
     }));
   },
 };
@@ -127,13 +127,13 @@ const POLYFILLED_MODULES = {
   http2:               'empty',
 };
 
-const SHIM_PATH = path.join(root, 'assets', 'bridge', 'dist', 'runtime_shim.js');
-const ENTRY     = path.join(root, 'assets', 'bridge', 'dist', 'mobile_entry.js');
-const OUTFILE   = path.join(root, 'assets', 'bridge', 'dist', 'bundle.browser.js');
+const SHIM_PATH = path.join(root, 'dist', 'runtime_shim.js');
+const ENTRY     = path.join(root, 'dist', 'mobile_entry.js');
+const OUTFILE   = path.join(root, 'dist', 'bundle.browser.js');
 
 process.env.BUILD_TARGET = 'bare';
 
-const { defaultPlugins } = await import('../assets/bridge/build_patches.mjs');
+const { defaultPlugins } = await import('./build_patches.mjs');
 
 const t0 = Date.now();
 const result = await build({
@@ -179,7 +179,7 @@ const result = await build({
     // the dart:http bridge (see flutter_js's sendMessage/onMessage setup
     // in lib/src/mobile/ncm_js_runtime.dart, which sets
     // `globalThis.XMLHttpRequest = makeNcmXhr()` before evaluating the bundle).
-    jsdom: path.join(root, 'assets', 'bridge', 'dist', 'polyfills', 'jsdom-empty.js'),
+    jsdom: path.join(root, 'dist', 'polyfills', 'jsdom-empty.js'),
     // Defensive axios adapter alias (esbuild alias doesn't reliably fire
     // before plugin onResolve in this build context, but it doesn't hurt
     // to keep this here as belt-and-suspenders).

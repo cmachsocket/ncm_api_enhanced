@@ -47,6 +47,101 @@ if (typeof globalThis.navigator === 'undefined') {
 }
 
 // ---------------------------------------------------------------------------
+// XHR shim (QuickJS has no XMLHttpRequest).
+//
+// Production target is flutter_js, which provides XMLHttpRequest backed by
+// dart:http. In the node smoke test we don't have flutter_js — we install
+// a minimal XHR shim here, only when running under plain node. The shim is
+// guarded so that production (QuickJS + dart-installed XHR) takes
+// precedence and the node fallback doesn't fire.
+// ---------------------------------------------------------------------------
+if (typeof globalThis.XMLHttpRequest === 'undefined' &&
+    typeof process !== 'undefined' && process.versions && process.versions.node) {
+  // Node-only XHR shim. Uses node http / https to actually perform the
+  // request. Synchronous-ish (axios calls .send() then awaits events).
+  // This exists ONLY for smoke-testing the bundle in plain node. In the
+  // QuickJS + flutter_js runtime, dart installs the real XMLHttpRequest
+  // via the dart:http bridge before evaluating this bundle.
+  //
+  // Note on `require`: vendor package.json declares "type": "module", so
+  // node treats .js files as ESM and forbids `require` at top level.
+  // But this whole shim is inside the rollup-emitted IIFE wrapper which
+  // rolls up to a CommonJS-shaped bundle (format: 'iife'). Inside that
+  // IIFE, `require` IS available because rollup leaves it as a bareword
+  // (not as an ESM import) when used at runtime. We use `require` here
+  // because the IIFE bundle's overall call shape requires a synchronous
+  // constructor — top-level await inside the IIFE is invalid.
+  // eslint-disable-next-line no-undef
+  const http  = require('http');
+  // eslint-disable-next-line no-undef
+  const https = require('https');
+  // eslint-disable-next-line no-undef
+  const { URL } = require('url');
+
+  class NodeXhrShim {
+    constructor() {
+      this.readyState = 0;
+      this.responseURL = '';
+      this.status = 0;
+      this.statusText = '';
+      this.responseText = '';
+      this.response = null;
+      this.responseType = '';
+      this._headers = {};
+      this._requestHeaders = {};
+      this._method = 'GET';
+      this._url = null;
+      this._aborted = false;
+      this.onreadystatechange = null;
+      this.onload = null;
+      this.onerror = null;
+    }
+    open(method, url) {
+      this._method = method;
+      this._url = url;
+      this.readyState = 1;
+    }
+    setRequestHeader(k, v) { this._requestHeaders[k] = v; }
+    abort() { this._aborted = true; }
+    getAllResponseHeaders() {
+      return Object.entries(this._headers)
+        .map(([k, v]) => `${k}: ${v}`).join('\r\n');
+    }
+    getResponseHeader(k) { return this._headers[k.toLowerCase()] || null; }
+    send(body) {
+      const url = new URL(this._url);
+      const lib = url.protocol === 'https:' ? https : http;
+      const req = lib.request({
+        method: this._method,
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname + url.search,
+        headers: this._requestHeaders,
+      }, (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          this.status = res.statusCode;
+          this.statusText = res.statusMessage;
+          this._headers = {};
+          for (const [k, v] of Object.entries(res.headers)) this._headers[k.toLowerCase()] = v;
+          this.responseText = Buffer.concat(chunks).toString('utf-8');
+          this.readyState = 4;
+          if (this.onreadystatechange) this.onreadystatechange();
+          if (this.onload) this.onload();
+        });
+      });
+      req.on('error', (err) => {
+        if (this.onerror) this.onerror(err);
+      });
+      if (body != null) req.write(body);
+      req.end();
+    }
+  }
+  globalThis.XMLHttpRequest = NodeXhrShim;
+}
+
+// ---------------------------------------------------------------------------
 // 2. Transport
 // ---------------------------------------------------------------------------
 // globalThis.__ncm_dart_recv is the OUTBOUND pipe: JS -> dart.
