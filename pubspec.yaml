@@ -1,10 +1,9 @@
 name: ncm_api_enhanced
 description: >
   Unofficial Netease Cloud Music API for Flutter, backed by an embedded
-  nodejs-mobile v18.20.4 runtime. Exposes all 439 upstream module
-  functions as a Dart facade; runs on Linux/macOS/Windows (via the
-  system `node` binary), Android (via libnode.so loaded by JNI), and
-  iOS (via NodeMobile.xcframework embedded in the .app bundle).
+  Node.js runtime (aarch64-android24 fork+exec, nodejs-mobile on iOS,
+  and the system `node` binary on Linux/macOS/Windows). Exposes all 439
+  upstream module functions as a Dart facade.
 version: 0.1.0
 homepage: https://github.com/cmachsocket/ncm_api_enhanced
 repository: https://github.com/cmachsocket/ncm_api_enhanced
@@ -21,10 +20,8 @@ dependencies:
   # even though the hook only runs at build time. These are not
   # shipped in the consumer's app binary — they're only resolved by
   # the host that runs `flutter pub get` / `dart pub get`.
-  archive: ^4.0.7
   code_assets: ^2.0.0
   hooks: ^2.2.0
-  http: ^1.5.0
   native_toolchain_c: ^0.19.4
   ffi: ^2.2.0
 
@@ -52,6 +49,19 @@ flutter:
     - path: assets/runtime/win-arm64/node.exe
       platforms:
         - windows
+    # Android node runtime.
+    #
+    # We ship a prebuilt `node` PIE binary (compiled from upstream
+    # Node.js with the Android NDK) into the Flutter asset bundle and
+    # fork+execvp it from the native bridge instead of linking
+    # libnode.so. Only arm64-v8a is supported today; armeabi-v7a and
+    # x86_64 builds will fail at start() with a clear error.
+    #
+    # Source: ../node/out/Release/node (aarch64-android24 from
+    # NDK r30). Cost: ~127 MB extra in the Android APK.
+    - path: assets/runtime/android-arm64/node
+      platforms:
+        - android
   plugin:
     platforms:
 

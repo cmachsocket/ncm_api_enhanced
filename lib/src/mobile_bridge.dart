@@ -35,6 +35,10 @@ typedef _RequestShutdownNative = Void Function();
 
 typedef _RequestShutdownDart = void Function();
 
+typedef _SetExecutablePathNative = Void Function(Pointer<Utf8> path);
+
+typedef _SetExecutablePathDart = void Function(Pointer<Utf8> path);
+
 typedef _IsRunningNative = Int32 Function();
 
 typedef _IsRunningDart = int Function();
@@ -84,6 +88,8 @@ class MobileNcmBridge implements NcmBridge {
 
   late final _RequestShutdownDart _requestShutdown;
 
+  late final _SetExecutablePathDart _setExecutablePath;
+
   late final _IsRunningDart _isRunning;
 
   final _pending = PendingTable();
@@ -103,6 +109,21 @@ class MobileNcmBridge implements NcmBridge {
   bool _shutdown = false;
 
   bool _nativeApiInitialized = false;
+
+  /// Absolute path of the Node executable that was extracted from the
+  /// app's code asset bundle and handed to the native bridge.
+  ///
+  /// Set in [start()] just before invoking the native
+  /// [ncm_node_set_executable_path]. Cleared by [shutdown()].
+  String? _nodeExecutablePath;
+
+  /// Filesystem directory containing the extracted `node` binary.
+  ///
+  /// Tracked separately from the bridge asset dir so we can keep it
+  /// alive for the entire process lifetime — the native bridge
+  /// keeps a copy of the path and may reference it until
+  /// [ncm_node_request_shutdown] returns.
+  Directory? _nodeDir;
 
   @override
   Stream<Map<String, dynamic>> get events => _stream.stream;
@@ -168,6 +189,13 @@ class MobileNcmBridge implements NcmBridge {
         );
 
     _log('loadNative: ncm_node_request_shutdown loaded');
+
+    _setExecutablePath = _library
+        .lookupFunction<_SetExecutablePathNative, _SetExecutablePathDart>(
+          'ncm_node_set_executable_path',
+        );
+
+    _log('loadNative: ncm_node_set_executable_path loaded');
 
     _isRunning = _library.lookupFunction<_IsRunningNative, _IsRunningDart>(
       'ncm_node_is_running',
@@ -434,6 +462,10 @@ class MobileNcmBridge implements NcmBridge {
 
       _log('START: bridgeRoot=$bridgeRoot');
 
+      _nodeExecutablePath = await _resolveNodeExecutable();
+
+      _log('START: nodeExecutable=$_nodeExecutablePath');
+
       final bundleJs = File(
         '${bridgeRoot}${Platform.pathSeparator}'
         'dist${Platform.pathSeparator}'
@@ -451,12 +483,38 @@ class MobileNcmBridge implements NcmBridge {
         );
       }
 
-      final arguments = <String>['node', bundleJs.path];
+      final arguments = <String>[
+        _nodeExecutablePath!,
+        bundleJs.path,
+      ];
 
       _log(
         'START: Node arguments='
         '${_shorten(arguments)}',
       );
+
+      // Push the executable path into native state before
+      // ncm_node_start() spawns the child.
+      final executablePathPtr =
+          _nodeExecutablePath!.toNativeUtf8();
+
+      try {
+
+        _log(
+          'START: calling ncm_node_set_executable_path '
+          '($_nodeExecutablePath)',
+        );
+
+        _setExecutablePath(executablePathPtr);
+
+        _log(
+          'START: ncm_node_set_executable_path returned',
+        );
+      } finally {
+
+        calloc.free(executablePathPtr);
+      }
+
 
       final argv = calloc<Pointer<Utf8>>(arguments.length);
 
@@ -529,6 +587,92 @@ class MobileNcmBridge implements NcmBridge {
   // ==========================================================================
   // Flutter assets
   // ==========================================================================
+
+  /// Resolve the absolute path of the Node executable to spawn.
+  ///
+  /// The native bridge does not link libnode.so; instead it
+  /// `fork()`+`execvp()`s an external `node` binary whose path we
+  /// hand in via `ncm_node_set_executable_path()`. The Dart side is
+  /// responsible for:
+  ///
+  ///   1. Extracting the `node` PIE from the Flutter asset bundle
+  ///      (`packages/ncm_api_enhanced/assets/runtime/android-arm64/node`)
+  ///      into a writable directory we own.
+  ///   2. `chmod 0o755` so the OS will actually exec it.
+  ///   3. Returning the absolute path of the extracted binary.
+  ///
+  /// Only `arm64-v8a` is shipped today; the same path is used
+  /// regardless of which specific arm64 device we land on.
+  Future<String> _resolveNodeExecutable() async {
+    const assetPath =
+        'packages/ncm_api_enhanced/'
+        'assets/runtime/android-arm64/node';
+
+    _log('resolveNodeExecutable: extracting $assetPath');
+
+    final data = await rootBundle.load(assetPath);
+
+    final bytes = data.buffer.asUint8List(
+      data.offsetInBytes,
+      data.lengthInBytes,
+    );
+
+    _log(
+      'resolveNodeExecutable: loaded '
+      'bytes=${bytes.length}',
+    );
+
+    final tmp = await Directory.systemTemp.createTemp(
+      'ncm_node_',
+    );
+
+    _nodeDir = tmp;
+
+    final nodeFile = File(
+      '${tmp.path}${Platform.pathSeparator}node',
+    );
+
+    await nodeFile.writeAsBytes(bytes, flush: true);
+
+    _log(
+      'resolveNodeExecutable: wrote '
+      '${nodeFile.path}',
+    );
+
+    //
+    // Android chmod doesn't use the POSIX mode_t; the dart:io
+    // Process.run chmod helper doesn't exist either, so we shell out
+    // to /system/bin/chmod. Most Android devices ship chmod at
+    // that path; if not, the subsequent execvp() will fail with
+    // EACCES and surface a clear error.
+    //
+    final chmod = await Process.run(
+      '/system/bin/chmod',
+      <String>['0755', nodeFile.path],
+    );
+
+    _log(
+      'resolveNodeExecutable: chmod exitCode='
+      '${chmod.exitCode}',
+    );
+
+    if (chmod.exitCode != 0) {
+
+      try {
+        await tmp.delete(recursive: true);
+      } catch (_) {}
+
+      _nodeDir = null;
+
+      throw BridgeError(
+        'failed to chmod 0755 the bundled node binary '
+        'at ${nodeFile.path}: '
+        '${(chmod.stderr as String).trim()}',
+      );
+    }
+
+    return nodeFile.path;
+  }
 
   Future<String> _resolveBridgeRoot() async {
     const explicitRoot = String.fromEnvironment('NCM_BRIDGE_ROOT');
@@ -959,6 +1103,23 @@ class MobileNcmBridge implements NcmBridge {
     _nativePort?.close();
 
     _nativePort = null;
+
+    //
+    // Best-effort cleanup of the extracted node binary directory.
+    //
+    final nodeDir = _nodeDir;
+    _nodeDir = null;
+    _nodeExecutablePath = null;
+    if (nodeDir != null) {
+      try {
+        await nodeDir.delete(recursive: true);
+      } catch (e) {
+        _log(
+          'SHUTDOWN: node dir cleanup failed '
+          'error=$e',
+        );
+      }
+    }
 
     if (!_stream.isClosed) {
       await _stream.close();

@@ -1,15 +1,8 @@
 import 'dart:io';
 
-import 'package:archive/archive.dart';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
-
-const _nodeVersion = '18.20.4';
-
-const _nodeAndroidReleaseUrl =
-    'https://github.com/nodejs-mobile/nodejs-mobile/releases/download/'
-    'v18.20.4/nodejs-mobile-v18.20.4-android.zip';
 
 const _bridgeAssetName = 'native/node_bridge.dart';
 
@@ -35,8 +28,8 @@ Future<void> main(List<String> args) async {
     }
 
     print(
-      'ncm_api_enhanced: building Node.js Mobile $_nodeVersion '
-      'for Android $abi',
+      'ncm_api_enhanced: building ncm_node_bridge '
+      'for Android $abi (spawning bundled node PIE)',
     );
 
     // -----------------------------------------------------------------------
@@ -162,38 +155,67 @@ Future<void> main(List<String> args) async {
     );
 
     // -----------------------------------------------------------------------
-    // Download + extract libnode.so.
+    // Verify the upstream Node binary is in the Flutter asset bundle.
+    //
+    // We do NOT compile or download anything for the Node runtime
+    // itself anymore. The Dart side extracts the binary from the
+    // Flutter asset bundle (declared in pubspec.yaml) at runtime and
+    // hands the absolute path to the native bridge, which spawns it
+    // via fork()+execvp().
+    //
+    // We only check the asset file exists so the user gets a clear
+    // error early if they forgot to populate it.
     // -----------------------------------------------------------------------
 
-    final nodeDir = Directory(
-      '${sharedDir.path}/nodejs-mobile-$_nodeVersion/$abi',
+    const packageAssetRoot =
+        'packages/ncm_api_enhanced/assets/runtime';
+
+    final nodeBinaryAsset =
+        '$packageAssetRoot/android-arm64/node';
+
+
+    //
+    // `rootBundle` is not available inside a build hook, but the
+    // asset path resolves to a real file on disk under
+    // input.packageRoot. Probe that file directly so we can fail
+    // fast with a useful message.
+    //
+    final nodeBinaryFile = File.fromUri(
+      input.packageRoot.resolve(
+        'assets/runtime/android-arm64/node',
+      ),
     );
 
-    await nodeDir.create(
-      recursive: true,
-    );
 
-    final nodeLibrary = File(
-      '${nodeDir.path}/libnode.so',
-    );
+    if (!await nodeBinaryFile.exists()) {
 
-    if (!await nodeLibrary.exists()) {
-      await _downloadNodeLibrary(
-        outputDirectory: sharedDir,
-        destination: nodeLibrary,
-        abi: abi,
-      );
-    }
-
-    if (!await nodeLibrary.exists()) {
       throw StateError(
-        'ncm_api_enhanced: failed to obtain libnode.so for $abi',
+        'ncm_api_enhanced: missing the Android node binary.\n'
+        '\n'
+        'Expected at:\n'
+        '  ${nodeBinaryFile.path}\n'
+        '\n'
+        'This package now spawns a prebuilt `node` PIE binary '
+        'instead of linking libnode.so. Populate that file by '
+        'copying your aarch64-android24 build:\n'
+        '\n'
+        '  cp <PROJECT>/node/out/Release/node '
+        '<THIS_PKG>/assets/runtime/android-arm64/node\n'
+        '\n'
+        'Only arm64-v8a is supported today. The Dart side will '
+        'fail at start() on other ABIs.',
       );
     }
+
+
+    final nodeSize =
+        await nodeBinaryFile.length();
+
 
     print(
-      'ncm_api_enhanced: libnode.so: '
-      '${nodeLibrary.path}',
+      'ncm_api_enhanced: using bundled node binary '
+      '(${(nodeSize / (1024 * 1024)).toStringAsFixed(1)} MB) '
+      'at asset path $nodeBinaryAsset',
     );
 
     // -----------------------------------------------------------------------
@@ -223,8 +245,10 @@ Future<void> main(List<String> args) async {
     //
     // and links:
     //
-    //     libnode.so
     //     liblog.so
+    //
+    // We intentionally do NOT link libnode.so — Node is now an
+    // external child process, not an in-process V8 instance.
     //
     // dart_api_dl_compat.cpp provides:
     //
@@ -251,12 +275,7 @@ Future<void> main(List<String> args) async {
       ],
 
       libraries: <String>[
-        'node',
         'log',
-      ],
-
-      libraryDirectories: <String>[
-        nodeDir.path,
       ],
 
       language: Language.cpp,
@@ -277,21 +296,9 @@ Future<void> main(List<String> args) async {
       output: output,
     );
 
-    // -----------------------------------------------------------------------
-    // Register libnode.so.
-    // -----------------------------------------------------------------------
-
-    output.assets.code.add(
-      CodeAsset(
-        package: input.packageName,
-        name: 'native/libnode.dart',
-        linkMode: DynamicLoadingBundled(),
-        file: nodeLibrary.uri,
-      ),
-    );
-
     print(
-      'ncm_api_enhanced: registered libnode.so for $abi',
+      'ncm_api_enhanced: registered libncm_node_bridge.so '
+      'for $abi (no in-process libnode)',
     );
   });
 }
@@ -371,153 +378,3 @@ String? _androidAbi(
   }
 }
 
-// ===========================================================================
-// Download + extract libnode.so
-// ===========================================================================
-
-Future<void> _downloadNodeLibrary({
-  required Directory outputDirectory,
-  required File destination,
-  required String abi,
-}) async {
-  final archiveDir = Directory(
-    '${outputDirectory.path}/nodejs-mobile-$_nodeVersion',
-  );
-
-  await archiveDir.create(
-    recursive: true,
-  );
-
-  final zipFile = File(
-    '${archiveDir.path}/'
-    'nodejs-mobile-v$_nodeVersion-android.zip',
-  );
-
-  // -------------------------------------------------------------------------
-  // Download ZIP if necessary.
-  // -------------------------------------------------------------------------
-
-  if (!await zipFile.exists()) {
-    print(
-      'ncm_api_enhanced: downloading '
-      '$_nodeAndroidReleaseUrl',
-    );
-
-    await _downloadFile(
-      Uri.parse(_nodeAndroidReleaseUrl),
-      zipFile,
-    );
-  }
-
-  // -------------------------------------------------------------------------
-  // Read ZIP.
-  // -------------------------------------------------------------------------
-
-  print(
-    'ncm_api_enhanced: extracting '
-    '$abi/libnode.so',
-  );
-
-  final bytes = await zipFile.readAsBytes();
-
-  final archive = ZipDecoder().decodeBytes(
-    bytes,
-    verify: true,
-  );
-
-  final expectedPath = 'bin/$abi/libnode.so';
-
-  ArchiveFile? nodeFile;
-
-  for (final file in archive.files) {
-    final normalized = file.name.replaceAll(
-      '\\',
-      '/',
-    );
-
-    if (normalized == expectedPath) {
-      nodeFile = file;
-      break;
-    }
-  }
-
-  if (nodeFile == null) {
-    throw StateError(
-      'ncm_api_enhanced: $expectedPath was not found in '
-      '$_nodeAndroidReleaseUrl',
-    );
-  }
-
-  final content = nodeFile.content;
-
-  await destination.parent.create(
-    recursive: true,
-  );
-
-  await destination.writeAsBytes(
-    content,
-    flush: true,
-  );
-
-  print(
-    'ncm_api_enhanced: extracted '
-    '${destination.path}',
-  );
-}
-
-// ===========================================================================
-// HTTP download
-// ===========================================================================
-
-Future<void> _downloadFile(
-  Uri url,
-  File destination,
-) async {
-  final temp = File(
-    '${destination.path}.download',
-  );
-
-  if (await temp.exists()) {
-    await temp.delete();
-  }
-
-  final client = HttpClient();
-
-  try {
-    client.userAgent =
-        'ncm_api_enhanced/$_nodeVersion '
-        '(Dart build hook)';
-
-    final request = await client.getUrl(url);
-
-    request.followRedirects = true;
-    request.maxRedirects = 8;
-
-    final response = await request.close();
-
-    if (response.statusCode != HttpStatus.ok) {
-      await response.drain();
-
-      throw HttpException(
-        'HTTP ${response.statusCode} while downloading $url',
-      );
-    }
-
-    final sink = temp.openWrite();
-
-    try {
-      await response.pipe(sink);
-    } catch (_) {
-      await sink.close();
-      rethrow;
-    }
-
-    await temp.rename(
-      destination.path,
-    );
-  } finally {
-    client.close(
-      force: true,
-    );
-  }
-}
