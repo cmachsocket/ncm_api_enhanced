@@ -1,9 +1,12 @@
 # ncm_api_enhanced
 
-Unofficial [Netease Cloud Music API](https://github.com/Binaryify/NeteaseCloudMusicApi) as a Flutter package.
-Embeds Node.js **v26.9.0** via [nodejs-mobile](https://github.com/nodejs-mobile/nodejs-mobile) (custom
+
+Unofficial [Netease Cloud Music API](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) as a Flutter package.
+Embeds Node.js **v26.9.0** via [nodejs](https://github.com/nodejs/node) (custom
 build at [`cmachsocket/node`](https://github.com/cmachsocket/node)) and exposes **438 upstream
 module functions** of `@neteasecloudmusicapienhanced/api` behind a single typed dispatch.
+
+Committed to using minimal patches and bridging code to ensure consistency with upstream.
 
 ```dart
 final api = NcmApi();
@@ -179,26 +182,15 @@ code paths; a 0 return is safe and triggers portable fallbacks.
 
 ### ABI coverage
 
-Each `cmachsocket/node v26.9.0` release tag carries **one** `libcpufeatures.so`
-matching the ABI of the `libnode.so` on the same tag. We publish per-ABI; an
-arm64-v8a tag fixes dlopen only on arm64 devices. To ship for `armeabi-v7a` or
-`x86_64`, cut additional tags built with
-[`tools/build_libcpufeatures.sh`](../../node/tools/build_libcpufeatures.sh)
-on the node fork.
+Each `cmachsocket/node v26.9.0` release tag carries **one** `libcpufeatures.so` file , only for `arm64-v8a`. 
+
+If you need `armeabi-v7a` or `x86_64`, you can contact me to request a build of `libcpufeatures.so` for that ABI. 
 
 ## iOS status
 
-iOS support is **not implemented in this version.** The package's pubspec
-declares `flutter.plugin.platforms.ios: NcmNodeBridge` and the Swift /
-Objective-C++ wrappers at `ios/Classes/` are present, but the Dart-side
-`MobileNcmBridge` only opens `libncm_node_bridge.so` via `dart:ffi` — it does
-not communicate with the Swift plugin over `MethodChannel` / `EventChannel`.
-Calling `NcmApi()` on iOS fails immediately at `_loadNative()` with
-`ArgumentError: Failed to load dynamic library 'libncm_node_bridge.so'`.
+I have no iOS device to test on, and NodeMobile.xcframework is not yet integrated into this package.
 
-To enable iOS, either (a) port `MobileNcmBridge` to use `MethodChannel` to
-delegate to `NcmNodePlugin.swift`, or (b) drop the plugin and FFI-dlopen
-`NodeMobile.framework` directly. Tracked in repo issues.
+Due to iOS limitations on JIT , on iOS you can only go back to explain mode. Performance is degraded, so it's not recommended to use this package on iOS. 
 
 ## Tests
 
