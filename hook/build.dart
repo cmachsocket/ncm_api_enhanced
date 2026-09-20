@@ -258,6 +258,12 @@ Future<void> main(List<String> args) async {
       '${cpuFeaturesLib.path}',
     );
 
+    // Declare the downloaded libcpufeatures.so as a hook dependency so
+    // that downstream Gradle tasks invalidate (and rebuild) when the
+    // .so changes. Without this, Flutter Gradle sees an unchanged
+    // output.json and may reuse a stale APK that omits libcpufeatures.
+    output.dependencies.add(cpuFeaturesLib.uri);
+
     // -----------------------------------------------------------------------
     // node_bridge.cpp
     // -----------------------------------------------------------------------
