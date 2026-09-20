@@ -10,6 +10,34 @@ const _nodeAndroidReleaseUrl =
     'https://github.com/cmachsocket/node/releases/download/'
     'v26.9.0/libnode.so';
 
+// libcpufeatures.so ships as a separate asset in the same release.
+//
+// Why we need it:
+//
+//   libnode.so (nodejs-mobile v26.9.0) imports `android_getCpuFeatures`.
+//   On Android that symbol exists ONLY in NDK's static
+//   `libcpufeatures.a` — no system .so exports it. dlopen(libnode.so)
+//   therefore fails with `cannot locate symbol "android_getCpuFeatures"`
+//   unless we ship a `libcpufeatures.so` providing it.
+//
+// The .so is a stub: it exports `android_getCpuFeatures` returning 0
+// (no optional CPU features advertised), which is safe because
+// nodejs-mobile only consults the value to pick V8 code paths — 0
+// just causes V8 to use portable fallbacks.
+//
+// IMPORTANT — ABI coverage:
+//
+//   Each release tag carries one `libcpufeatures.so` corresponding to
+//   the SAME ABI as the matching `libnode.so`. ELF .so files are NOT
+//   ABI-interchangeable, so a release tagged for `arm64-v8a` only fixes
+//   dlopen on arm64 devices. Other ABIs (armeabi-v7a, x86_64) need
+//   their own release tag — the publish script
+//   `node/tools/build_libcpufeatures.sh` exists to produce per-ABI
+//   stubs but the URL below is intentionally fixed (one ABI == one tag).
+const _cpuFeaturesAndroidReleaseUrl =
+    'https://github.com/cmachsocket/node/releases/download/'
+    'v26.9.0/libcpufeatures.so';
+
 const _bridgeAssetName = 'native/node_bridge.dart';
 
 Future<void> main(List<String> args) async {
@@ -196,6 +224,41 @@ Future<void> main(List<String> args) async {
     );
 
     // -----------------------------------------------------------------------
+    // Download libcpufeatures.so.
+    //
+    // libnode.so (nodejs-mobile v26.9.0) imports `android_getCpuFeatures`
+    // but no Android system .so exports that symbol — it lives only in
+    // NDK's static `libcpufeatures.a`. dlopen(libnode.so) therefore fails
+    // with `cannot locate symbol "android_getCpuFeatures"` unless we ship
+    // a `libcpufeatures.so` providing it. The release at
+    //   _cpuFeaturesAndroidReleaseUrl
+    // publishes a prebuilt per-ABI `libcpufeatures.so` next to every
+    // `libnode.so`. We download it the same way we download libnode.so.
+    // -----------------------------------------------------------------------
+
+    final cpuFeaturesLib = File(
+      '${nodeDir.path}/libcpufeatures.so',
+    );
+
+    if (!await cpuFeaturesLib.exists()) {
+      await _downloadCpuFeaturesLibrary(
+        destination: cpuFeaturesLib,
+      );
+    }
+
+    if (!await cpuFeaturesLib.exists()) {
+      throw StateError(
+        'ncm_api_enhanced: failed to obtain libcpufeatures.so '
+        'for $abi',
+      );
+    }
+
+    print(
+      'ncm_api_enhanced: libcpufeatures.so: '
+      '${cpuFeaturesLib.path}',
+    );
+
+    // -----------------------------------------------------------------------
     // node_bridge.cpp
     // -----------------------------------------------------------------------
 
@@ -252,6 +315,14 @@ Future<void> main(List<String> args) async {
       libraries: <String>[
         'node',
         'log',
+        // libcpufeatures.so is downloaded from the same GitHub release
+        // as libnode.so (see _downloadCpuFeaturesLibrary). libnode.so
+        // imports `android_getCpuFeatures` from it; declaring the
+        // dependency here causes the linker to emit
+        // `DT_NEEDED libcpufeatures.so` into libncm_node_bridge.so,
+        // which lets Android's dynamic linker resolve the symbol at
+        // dlopen() time.
+        'cpufeatures',
       ],
 
       libraryDirectories: <String>[
@@ -291,6 +362,43 @@ Future<void> main(List<String> args) async {
 
     print(
       'ncm_api_enhanced: registered libnode.so for $abi',
+    );
+
+    // -----------------------------------------------------------------------
+    // Copy libnode.so + libcpufeatures.so into plugin jniLibs.
+    //
+    // Android's dynamic linker resolves `NEEDED` entries by looking in
+    // (a) the caller process's own loaded libraries, and (b) the same
+    // directory as the library being loaded. libncm_node_bridge.so is
+    // loaded by the Flutter embedding via `dlopen`, and it sits in
+    // `<apk>/lib/<abi>/`. Therefore libnode.so + libcpufeatures.so MUST
+    // also be present in that same APK directory or dlopen fails.
+    //
+    // `output.assets.code` (above) only registers a CodeAsset for
+    // Dart's `DynamicLibrary.open` lookup — it does NOT place the file
+    // into the APK. The Flutter Gradle plugin's `jniLibs.srcDirs` picks
+    // up files from `android/src/main/jniLibs/<abi>/` and packages them
+    // into the APK, so we copy both .so's there.
+    // -----------------------------------------------------------------------
+
+    final jniLibsAbiDir = Directory(
+      '${input.packageRoot.toFilePath()}'
+      'android/src/main/jniLibs/$abi',
+    );
+
+    await jniLibsAbiDir.create(recursive: true);
+
+    await nodeLibrary.copy(
+      '${jniLibsAbiDir.path}/libnode.so',
+    );
+
+    await cpuFeaturesLib.copy(
+      '${jniLibsAbiDir.path}/libcpufeatures.so',
+    );
+
+    print(
+      'ncm_api_enhanced: installed native libs into '
+      '${jniLibsAbiDir.path}',
     );
   });
 }
@@ -347,6 +455,48 @@ Future<void> _prepareDartApiDlCpp({
     flush: true,
   );
 }
+
+// ===========================================================================
+// Download libcpufeatures.so
+// ===========================================================================
+//
+// Mirrors _downloadNodeLibrary. Pulls the prebuilt per-ABI
+// `libcpufeatures.so` stub from the same GitHub release as `libnode.so`
+// and drops it next to it.
+//
+// Why we ship libcpufeatures.so at all:
+//
+//   libnode.so (nodejs-mobile v26.9.0) imports `android_getCpuFeatures`.
+//   On Android that symbol exists ONLY in NDK's static
+//   `libcpufeatures.a` — no system .so exports it. dlopen(libnode.so)
+//   therefore fails with `cannot locate symbol "android_getCpuFeatures"`
+//   unless we provide a `libcpufeatures.so` exporting it. The stub is
+//   safe because nodejs-mobile only consults the value to pick V8 code
+//   paths — a 0 return triggers portable fallbacks.
+// ===========================================================================
+
+Future<void> _downloadCpuFeaturesLibrary({
+  required File destination,
+}) async {
+  print(
+    'ncm_api_enhanced: downloading '
+    '$_cpuFeaturesAndroidReleaseUrl',
+  );
+
+  await _downloadFile(
+    Uri.parse(_cpuFeaturesAndroidReleaseUrl),
+    destination,
+  );
+
+  // Match libnode.so: ensure executable permission.
+  await Process.run('chmod', ['755', destination.path]);
+
+  print(
+    'ncm_api_enhanced: copied '
+    '${destination.path}',
+  );
+}
+
 
 // ===========================================================================
 // Android ABI
