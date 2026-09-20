@@ -1,15 +1,14 @@
 import 'dart:io';
 
-import 'package:archive/archive.dart';
 import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
 
-const _nodeVersion = '18.20.4';
+const _nodeVersion = '26.9.0';
 
 const _nodeAndroidReleaseUrl =
-    'https://github.com/nodejs-mobile/nodejs-mobile/releases/download/'
-    'v18.20.4/nodejs-mobile-v18.20.4-android.zip';
+    'https://github.com/cmachsocket/node/releases/download/'
+    'v26.9.0/libnode.so';
 
 const _bridgeAssetName = 'native/node_bridge.dart';
 
@@ -162,7 +161,7 @@ Future<void> main(List<String> args) async {
     );
 
     // -----------------------------------------------------------------------
-    // Download + extract libnode.so.
+    // Download libnode.so.
     // -----------------------------------------------------------------------
 
     final nodeDir = Directory(
@@ -372,7 +371,7 @@ String? _androidAbi(
 }
 
 // ===========================================================================
-// Download + extract libnode.so
+// Download libnode.so
 // ===========================================================================
 
 Future<void> _downloadNodeLibrary({
@@ -380,24 +379,23 @@ Future<void> _downloadNodeLibrary({
   required File destination,
   required String abi,
 }) async {
-  final archiveDir = Directory(
+  final nodeDir = Directory(
     '${outputDirectory.path}/nodejs-mobile-$_nodeVersion',
   );
 
-  await archiveDir.create(
+  await nodeDir.create(
     recursive: true,
   );
 
-  final zipFile = File(
-    '${archiveDir.path}/'
-    'nodejs-mobile-v$_nodeVersion-android.zip',
+  final soFile = File(
+    '${nodeDir.path}/libnode.so',
   );
 
   // -------------------------------------------------------------------------
-  // Download ZIP if necessary.
+  // Download .so directly if necessary.
   // -------------------------------------------------------------------------
 
-  if (!await zipFile.exists()) {
+  if (!await soFile.exists()) {
     print(
       'ncm_api_enhanced: downloading '
       '$_nodeAndroidReleaseUrl',
@@ -405,62 +403,35 @@ Future<void> _downloadNodeLibrary({
 
     await _downloadFile(
       Uri.parse(_nodeAndroidReleaseUrl),
-      zipFile,
+      soFile,
     );
   }
 
   // -------------------------------------------------------------------------
-  // Read ZIP.
+  // Ensure executable permission.
+  // -------------------------------------------------------------------------
+
+  await Process.run('chmod', ['755', soFile.path]);
+
+  // -------------------------------------------------------------------------
+  // Copy to final destination.
   // -------------------------------------------------------------------------
 
   print(
-    'ncm_api_enhanced: extracting '
-    '$abi/libnode.so',
+    'ncm_api_enhanced: using '
+    '${soFile.path}',
   );
-
-  final bytes = await zipFile.readAsBytes();
-
-  final archive = ZipDecoder().decodeBytes(
-    bytes,
-    verify: true,
-  );
-
-  final expectedPath = 'bin/$abi/libnode.so';
-
-  ArchiveFile? nodeFile;
-
-  for (final file in archive.files) {
-    final normalized = file.name.replaceAll(
-      '\\',
-      '/',
-    );
-
-    if (normalized == expectedPath) {
-      nodeFile = file;
-      break;
-    }
-  }
-
-  if (nodeFile == null) {
-    throw StateError(
-      'ncm_api_enhanced: $expectedPath was not found in '
-      '$_nodeAndroidReleaseUrl',
-    );
-  }
-
-  final content = nodeFile.content;
 
   await destination.parent.create(
     recursive: true,
   );
 
-  await destination.writeAsBytes(
-    content,
-    flush: true,
+  await soFile.copy(
+    destination.path,
   );
 
   print(
-    'ncm_api_enhanced: extracted '
+    'ncm_api_enhanced: copied '
     '${destination.path}',
   );
 }

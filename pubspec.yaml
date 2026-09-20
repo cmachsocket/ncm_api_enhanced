@@ -1,9 +1,9 @@
 name: ncm_api_enhanced
 description: >
   Unofficial Netease Cloud Music API for Flutter, backed by an embedded
-  nodejs-mobile v18.20.4 runtime. Exposes all 439 upstream module
-  functions as a Dart facade; runs on Linux/macOS/Windows (via the
-  system `node` binary), Android (via libnode.so loaded by JNI), and
+  Node.js v26.9.0 runtime. Exposes all 439 upstream module functions
+  as a Dart facade; runs on Linux/macOS/Windows (via the system `node`
+  binary), Android (via libnode.so loaded by the native bridge), and
   iOS (via NodeMobile.xcframework embedded in the .app bundle).
 version: 0.1.0
 homepage: https://github.com/cmachsocket/ncm_api_enhanced
@@ -21,10 +21,8 @@ dependencies:
   # even though the hook only runs at build time. These are not
   # shipped in the consumer's app binary — they're only resolved by
   # the host that runs `flutter pub get` / `dart pub get`.
-  archive: ^4.0.7
   code_assets: ^2.0.0
   hooks: ^2.2.0
-  http: ^1.5.0
   native_toolchain_c: ^0.19.4
   ffi: ^2.2.0
 
