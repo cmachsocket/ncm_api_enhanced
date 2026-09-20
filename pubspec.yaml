@@ -5,7 +5,7 @@ description: >
   as a Dart facade; runs on Linux/macOS/Windows (via the system `node`
   binary), Android (via libnode.so loaded by the native bridge), and
   iOS (via NodeMobile.xcframework embedded in the .app bundle).
-version: 0.1.0
+version: 0.2.0
 homepage: https://github.com/cmachsocket/ncm_api_enhanced
 repository: https://github.com/cmachsocket/ncm_api_enhanced
 
