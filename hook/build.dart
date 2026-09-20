@@ -348,7 +348,22 @@ Future<void> main(List<String> args) async {
     );
 
     // -----------------------------------------------------------------------
-    // Register libnode.so.
+    // Register libnode.so + libcpufeatures.so as CodeAssets.
+    //
+    // Both .so files MUST end up in `<apk>/lib/<abi>/` at runtime —
+    // Android's dynamic linker only resolves DT_NEEDED entries by
+    // searching the same directory as the library being dlopen()ed.
+    //
+    // The new-style Flutter hooks protocol packages a CodeAsset with
+    // linkMode = DynamicLoadingBundled into the APK automatically;
+    // we do NOT need (and do NOT want) any jniLibs/ copy. The
+    // traditional "copy to android/src/main/jniLibs/<abi>/" approach
+    // only works when the package declares itself as a Flutter plugin
+    // via pubspec's `flutter.plugin.platforms.android`. ncm_api_enhanced
+    // does NOT register an Android plugin — it is a pure Dart package
+    // with hooks — so that copy would just land in the package's own
+    // pub-cache directory and never reach the APK. The CodeAsset
+    // path is the right one.
     // -----------------------------------------------------------------------
 
     output.assets.code.add(
@@ -364,41 +379,17 @@ Future<void> main(List<String> args) async {
       'ncm_api_enhanced: registered libnode.so for $abi',
     );
 
-    // -----------------------------------------------------------------------
-    // Copy libnode.so + libcpufeatures.so into plugin jniLibs.
-    //
-    // Android's dynamic linker resolves `NEEDED` entries by looking in
-    // (a) the caller process's own loaded libraries, and (b) the same
-    // directory as the library being loaded. libncm_node_bridge.so is
-    // loaded by the Flutter embedding via `dlopen`, and it sits in
-    // `<apk>/lib/<abi>/`. Therefore libnode.so + libcpufeatures.so MUST
-    // also be present in that same APK directory or dlopen fails.
-    //
-    // `output.assets.code` (above) only registers a CodeAsset for
-    // Dart's `DynamicLibrary.open` lookup — it does NOT place the file
-    // into the APK. The Flutter Gradle plugin's `jniLibs.srcDirs` picks
-    // up files from `android/src/main/jniLibs/<abi>/` and packages them
-    // into the APK, so we copy both .so's there.
-    // -----------------------------------------------------------------------
-
-    final jniLibsAbiDir = Directory(
-      '${input.packageRoot.toFilePath()}'
-      'android/src/main/jniLibs/$abi',
-    );
-
-    await jniLibsAbiDir.create(recursive: true);
-
-    await nodeLibrary.copy(
-      '${jniLibsAbiDir.path}/libnode.so',
-    );
-
-    await cpuFeaturesLib.copy(
-      '${jniLibsAbiDir.path}/libcpufeatures.so',
+    output.assets.code.add(
+      CodeAsset(
+        package: input.packageName,
+        name: 'native/libcpufeatures.dart',
+        linkMode: DynamicLoadingBundled(),
+        file: cpuFeaturesLib.uri,
+      ),
     );
 
     print(
-      'ncm_api_enhanced: installed native libs into '
-      '${jniLibsAbiDir.path}',
+      'ncm_api_enhanced: registered libcpufeatures.so for $abi',
     );
   });
 }

@@ -13,7 +13,8 @@ import 'package:flutter_test/flutter_test.dart';
 import '../hook/build.dart' as hook;
 
 void main() {
-  test('hook declares a single Android CodeAsset per ABI', () async {
+  test('hook declares CodeAssets for libnode + libcpufeatures per ABI',
+      () async {
     // Map from code_assets Architecture → expected ABI substring in
     // the generated asset id (matches hook's hard-coded name format).
     final archToName = {
@@ -27,29 +28,40 @@ void main() {
         targetOS: OS.android,
         targetArchitecture: arch,
         check: (input, output) {
-          expect(output.assets.encodedAssets, isNotEmpty,
-              reason: 'hook must emit at least one CodeAsset for $arch');
           final assets = output.assets.code.toList();
-          expect(assets.length, 1);
-          final a = assets.single;
-          // id is `package:<pkg>/<name>`. Verify the package prefix is
-          // ours and the name encodes the ABI directory.
-          expect(a.id, startsWith('package:ncm_api_enhanced/'));
-          expect(a.id, contains(archToName[arch]!));
-          expect(a.linkMode, isA<DynamicLoadingBundled>());
-          expect(a.file, isNotNull,
-              reason: 'DynamicLoadingBundled requires a file Uri');
-          final file = File.fromUri(a.file!);
-          expect(file.existsSync(), isTrue,
-              reason: 'file must exist on disk: ${a.file}');
-          expect(file.statSync().size, greaterThan(1024 * 1024),
-              reason: 'libnode.so is ~30 MB; smaller means corrupt');
-          // The same .so must also be copied into the plugin's jniLibs
-          // directory so CMake can find it at link time.
-          final jniPath =
-              '${input.packageRoot.toFilePath()}android/src/main/jniLibs/${archToName[arch]}/libnode.so';
-          expect(File(jniPath).existsSync(), isTrue,
-              reason: 'libnode.so must be in plugin jniLibs for CMake');
+          expect(assets.length, 2,
+              reason:
+                  'hook must emit exactly 2 CodeAssets per ABI: '
+                  'libnode + libcpufeatures');
+
+          // Both must be libnode.so and libcpufeatures.so, in some order.
+          final ids = assets.map((a) => a.id).toList();
+          expect(
+              ids,
+              containsAll(<String>[
+                'package:ncm_api_enhanced/native/libnode.dart',
+                'package:ncm_api_enhanced/native/libcpufeatures.dart',
+              ]));
+
+          for (final a in assets) {
+            expect(a.id, startsWith('package:ncm_api_enhanced/'));
+            expect(a.linkMode, isA<DynamicLoadingBundled>());
+            expect(a.file, isNotNull,
+                reason: 'DynamicLoadingBundled requires a file Uri');
+            final file = File.fromUri(a.file!);
+            expect(file.existsSync(), isTrue,
+                reason: 'file must exist on disk: ${a.file}');
+            if (a.id.endsWith('libnode.dart')) {
+              expect(file.statSync().size, greaterThan(1024 * 1024),
+                  reason: 'libnode.so is ~30 MB; smaller means corrupt');
+            } else if (a.id.endsWith('libcpufeatures.dart')) {
+              // Stub: tiny.
+              expect(file.statSync().size, lessThan(64 * 1024),
+                  reason:
+                      'libcpufeatures.so stub is <64 KB; larger means '
+                      'we accidentally shipped a full NDK cpufeatures.a');
+            }
+          }
         },
       );
     }
