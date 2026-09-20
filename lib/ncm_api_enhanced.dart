@@ -5,13 +5,9 @@
 ///   * Linux / macOS / Windows: spawns the system `node` binary
 ///     (>=18 required) and talks NDJSON over stdin/stdout. The upstream
 ///     module functions are required directly — no HTTP server is started.
-///   * Android: ships a prebuilt `node` PIE binary (aarch64-android24
-///     cross-compiled from upstream Node.js) as a Flutter asset and
-///     fork()+execvp()s it from a native bridge. The Dart build hook
-///     compiles `libncm_node_bridge.so` against the system NDK; no
-///     vendoring of nodejs-mobile is required.
-///   * iOS: still uses nodejs-mobile via NodeMobile.xcframework, added
-///     by the consumer's Xcode project.
+///   * Android / iOS: embeds libnode via nodejs-mobile v18.20.4 and runs
+///     the same bridge.js through a platform channel. (Native side
+///     not bundled with this package — see README.)
 ///
 /// Concurrency:
 ///   Every call returns a [Future]. Issuing N calls without awaiting runs
