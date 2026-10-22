@@ -5,15 +5,12 @@ import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
 
-const _nodeVersion = '26.9.0';
-
-// Node.js version bundled for Windows desktop builds.
+// Node.js version used on every platform.
 //
-// Kept separate from _nodeVersion because the Android libnode.so release
-// is built per Node.js version and currently only exists for 26.9.0.
-// Bump this (and _nodeWindowsSha256) when a newer official Windows build
-// is wanted.
-const _windowsNodeVersion = '26.12.1';
+// Android: prebuilt libnode.so / libcpufeatures.so published under the
+//          cmachsocket/node v$_nodeVersion release tag.
+// Windows: official node.exe from nodejs.org (see _nodeWindowsSha256).
+const _nodeVersion = '26.12.1';
 
 // ---------------------------------------------------------------------------
 // Windows node.exe
@@ -27,7 +24,7 @@ const _windowsNodeVersion = '26.12.1';
 //
 // SHA-256 values are copied from
 //   https://nodejs.org/dist/v26.12.1/SHASUMS256.txt
-// and MUST be updated together with _windowsNodeVersion.
+// and MUST be updated together with _nodeVersion.
 // ---------------------------------------------------------------------------
 
 const _nodeWindowsSha256 = <String, String>{
@@ -40,11 +37,11 @@ const _nodeWindowsSha256 = <String, String>{
 // reach nodejs.org.
 List<Uri> _nodeWindowsUrls(String flavor) => <Uri>[
   Uri.parse(
-    'https://nodejs.org/dist/v$_windowsNodeVersion/'
+    'https://nodejs.org/dist/v$_nodeVersion/'
     '$flavor/node.exe',
   ),
   Uri.parse(
-    'https://npmmirror.com/mirrors/node/v$_windowsNodeVersion/'
+    'https://npmmirror.com/mirrors/node/v$_nodeVersion/'
     '$flavor/node.exe',
   ),
 ];
@@ -55,13 +52,13 @@ const _downloadAttempts = 3;
 
 const _nodeAndroidReleaseUrl =
     'https://github.com/cmachsocket/node/releases/download/'
-    'v26.9.0/libnode.so';
+    'v$_nodeVersion/libnode.so';
 
 // libcpufeatures.so ships as a separate asset in the same release.
 //
 // Why we need it:
 //
-//   libnode.so (nodejs-mobile v26.9.0) imports `android_getCpuFeatures`.
+//   libnode.so (nodejs-mobile) imports `android_getCpuFeatures`.
 //   On Android that symbol exists ONLY in NDK's static
 //   `libcpufeatures.a` — no system .so exports it. dlopen(libnode.so)
 //   therefore fails with `cannot locate symbol "android_getCpuFeatures"`
@@ -83,7 +80,7 @@ const _nodeAndroidReleaseUrl =
 //   stubs but the URL below is intentionally fixed (one ABI == one tag).
 const _cpuFeaturesAndroidReleaseUrl =
     'https://github.com/cmachsocket/node/releases/download/'
-    'v26.9.0/libcpufeatures.so';
+    'v$_nodeVersion/libcpufeatures.so';
 
 const _bridgeAssetName = 'native/node_bridge.dart';
 
@@ -263,7 +260,7 @@ Future<void> main(List<String> args) async {
     // -----------------------------------------------------------------------
     // Download libcpufeatures.so.
     //
-    // libnode.so (nodejs-mobile v26.9.0) imports `android_getCpuFeatures`
+    // libnode.so (nodejs-mobile) imports `android_getCpuFeatures`
     // but no Android system .so exports that symbol — it lives only in
     // NDK's static `libcpufeatures.a`. dlopen(libnode.so) therefore fails
     // with `cannot locate symbol "android_getCpuFeatures"` unless we ship
@@ -473,14 +470,14 @@ Future<void> _buildWindowsRuntime({
   final sharedDir = Directory.fromUri(input.outputDirectoryShared);
 
   final nodeExe = File(
-    '${sharedDir.path}/nodejs-win-$_windowsNodeVersion/'
+    '${sharedDir.path}/nodejs-win-$_nodeVersion/'
     '$flavor/node.exe',
   );
 
   if (!await _hasValidNodeWindowsBinary(nodeExe, flavor)) {
     final cached = await _cachedDownload(
       fallbackDir: sharedDir,
-      relativePath: 'nodejs-win-$_windowsNodeVersion/$flavor/node.exe',
+      relativePath: 'nodejs-win-$_nodeVersion/$flavor/node.exe',
       urls: _nodeWindowsUrls(flavor),
       minSize: 50 * 1024 * 1024,
       sha256: _nodeWindowsSha256[flavor],
@@ -723,7 +720,7 @@ Future<void> _prepareDartApiDlCpp({
 //
 // Why we ship libcpufeatures.so at all:
 //
-//   libnode.so (nodejs-mobile v26.9.0) imports `android_getCpuFeatures`.
+//   libnode.so (nodejs-mobile) imports `android_getCpuFeatures`.
 //   On Android that symbol exists ONLY in NDK's static
 //   `libcpufeatures.a` — no system .so exports it. dlopen(libnode.so)
 //   therefore fails with `cannot locate symbol "android_getCpuFeatures"`

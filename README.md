@@ -2,9 +2,9 @@
 
 
 Unofficial [Netease Cloud Music API](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) as a Flutter package.
-Embeds Node.js via [nodejs](https://github.com/nodejs/node) (Android uses a
-custom build at [`cmachsocket/node`](https://github.com/cmachsocket/node),
-Windows uses the official 26.12.1 binary) and exposes **438 upstream
+Embeds Node.js **26.12.1** via [nodejs](https://github.com/nodejs/node) (Android
+uses a custom build at [`cmachsocket/node`](https://github.com/cmachsocket/node),
+Windows uses the official binary) and exposes **438 upstream
 module functions** of `@neteasecloudmusicapienhanced/api` behind a single typed dispatch.
 
 Committed to using minimal patches and bridging code to ensure consistency with upstream.
@@ -46,7 +46,7 @@ flutter build apk          # or `flutter run`
 On Android, the first build runs `hook/build.dart`, which:
 
 1. Downloads the prebuilt `libnode.so` from
-   [`cmachsocket/node v26.9.0`](https://github.com/cmachsocket/node/releases/tag/v26.9.0).
+   [`cmachsocket/node v26.12.1`](https://github.com/cmachsocket/node/releases/tag/v26.12.1).
 2. Downloads `libcpufeatures.so` (same release).
 3. Compiles `native/android/node_bridge.cpp` into `libncm_node_bridge.so` using the
    NDK clang that the Flutter SDK ships with.
@@ -167,7 +167,7 @@ declared as Flutter assets in `pubspec.yaml`.
 | Asset | Source | Shipped by | Cached? |
 | --- | --- | --- | --- |
 | `bridge.js` + `dist/bundle.js` | This repo (`assets/bridge/`) | Flutter `assets:` declaration | Committed to git |
-| `libnode.so` (Android) | [`cmachsocket/node v26.9.0`](https://github.com/cmachsocket/node/releases/tag/v26.9.0) | `hook/build.dart` | `~/.cache/ncm_api_enhanced/` |
+| `libnode.so` (Android) | [`cmachsocket/node v26.12.1`](https://github.com/cmachsocket/node/releases/tag/v26.12.1) | `hook/build.dart` | `~/.cache/ncm_api_enhanced/` |
 | `libcpufeatures.so` (Android) | Same release, separate asset | `hook/build.dart` | Same cache |
 | `node.exe` (Windows, x64 / arm64) | [nodejs.org dist v26.12.1](https://nodejs.org/dist/v26.12.1/) | `hook/build.dart` (bundled `CodeAsset`) | Same cache |
 
@@ -206,7 +206,7 @@ code paths; a 0 return is safe and triggers portable fallbacks.
 
 ### ABI coverage
 
-Android support is **arm64-v8a only**. The `cmachsocket/node v26.9.0` release
+Android support is **arm64-v8a only**. The `cmachsocket/node v26.12.1` release
 carries a single arm64 `libnode.so` / `libcpufeatures.so` pair, so
 `hook/build.dart` rejects `armeabi-v7a`, `x86_64` and other ABIs with an
 `UnsupportedError` instead of producing an APK with the wrong architecture.
