@@ -2,8 +2,9 @@
 
 
 Unofficial [Netease Cloud Music API](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) as a Flutter package.
-Embeds Node.js **v26.9.0** via [nodejs](https://github.com/nodejs/node) (custom
-build at [`cmachsocket/node`](https://github.com/cmachsocket/node)) and exposes **438 upstream
+Embeds Node.js via [nodejs](https://github.com/nodejs/node) (Android uses a
+custom build at [`cmachsocket/node`](https://github.com/cmachsocket/node),
+Windows uses the official 26.12.1 binary) and exposes **438 upstream
 module functions** of `@neteasecloudmusicapienhanced/api` behind a single typed dispatch.
 
 Committed to using minimal patches and bridging code to ensure consistency with upstream.
@@ -24,8 +25,8 @@ await api.shutdown();
 | Platform | Runtime | Bridge transport |
 | --- | --- | --- |
 | Linux / macOS | System `node` (≥18) spawned via `Process.start` | NDJSON over stdin/stdout |
-| Windows | Embedded `node.exe` (Node 26.8.2) shipped as a Flutter asset | NDJSON over stdin/stdout |
-| Android | Embedded `libnode.so` loaded by native FFI | `dart:ffi` → `libncm_node_bridge.so` ↔ pipes |
+| Windows | `node.exe` (Node 26.12.1) fetched by `hook/build.dart` and bundled next to the app executable | NDJSON over stdin/stdout |
+| Android | Embedded `libnode.so` (arm64-v8a only) loaded by native FFI | `dart:ffi` → `libncm_node_bridge.so` ↔ pipes |
 | iOS | **Not implemented in this version.** See [iOS status](#ios-status) | — |
 
 ## Install
@@ -44,15 +45,20 @@ flutter build apk          # or `flutter run`
 
 On Android, the first build runs `hook/build.dart`, which:
 
-1. Downloads `libnode.so` for your target ABI from
+1. Downloads the prebuilt `libnode.so` from
    [`cmachsocket/node v26.9.0`](https://github.com/cmachsocket/node/releases/tag/v26.9.0).
 2. Downloads `libcpufeatures.so` (same release).
 3. Compiles `native/android/node_bridge.cpp` into `libncm_node_bridge.so` using the
    NDK clang that the Flutter SDK ships with.
-4. Registers both `.so` files as `CodeAsset`s so Gradle packages them into
-   `<apk>/lib/<abi>/`.
+4. Registers all three `.so` files as `CodeAsset`s so Gradle packages them into
+   `<apk>/lib/arm64-v8a/`.
 
-Cached under `~/.cache/ncm_api_enhanced/`; subsequent builds skip the downloads.
+Android builds are **arm64-v8a only**: the prebuilt binaries are arm64, so
+`armeabi-v7a` / `x86_64` targets fail the build with an explicit error.
+
+All downloads are cached under `~/.cache/ncm_api_enhanced/`
+(`%LOCALAPPDATA%\ncm_api_enhanced` on Windows); subsequent builds skip the
+network entirely.
 
 ## Usage
 
@@ -163,7 +169,25 @@ declared as Flutter assets in `pubspec.yaml`.
 | `bridge.js` + `dist/bundle.js` | This repo (`assets/bridge/`) | Flutter `assets:` declaration | Committed to git |
 | `libnode.so` (Android) | [`cmachsocket/node v26.9.0`](https://github.com/cmachsocket/node/releases/tag/v26.9.0) | `hook/build.dart` | `~/.cache/ncm_api_enhanced/` |
 | `libcpufeatures.so` (Android) | Same release, separate asset | `hook/build.dart` | Same cache |
-| `node.exe` (Windows, x64 + arm64) | This repo (`assets/runtime/win-*/`) | Flutter `assets:` declaration | Committed to git |
+| `node.exe` (Windows, x64 / arm64) | [nodejs.org dist v26.12.1](https://nodejs.org/dist/v26.12.1/) | `hook/build.dart` (bundled `CodeAsset`) | Same cache |
+
+### Windows `node.exe`
+
+The Windows runtime is **not committed** to this repository and **not** declared
+in `pubspec.yaml`. `hook/build.dart` downloads the official binary matching the
+build's target architecture (SHA-256 verified) and registers it as a bundled
+`CodeAsset`; Flutter then installs it as `node.exe` next to the application
+executable, where `DesktopNcmBridge` picks it up.
+
+The first `flutter build windows` / `flutter run -d windows` downloads
+~105 MB (x64) or ~87 MB (arm64) and reuses it for later builds. The binary
+is fetched from `nodejs.org`, with `npmmirror.com` as a fallback.
+
+To skip the download, pass an explicit executable:
+
+```dart
+NcmApi(bridge: DesktopNcmBridge(nodeExecutable: r'C:\Program Files\nodejs\node.exe'));
+```
 
 ### Why `libcpufeatures.so`?
 
@@ -182,9 +206,13 @@ code paths; a 0 return is safe and triggers portable fallbacks.
 
 ### ABI coverage
 
-Each `cmachsocket/node v26.9.0` release tag carries **one** `libcpufeatures.so` file , only for `arm64-v8a`. 
+Android support is **arm64-v8a only**. The `cmachsocket/node v26.9.0` release
+carries a single arm64 `libnode.so` / `libcpufeatures.so` pair, so
+`hook/build.dart` rejects `armeabi-v7a`, `x86_64` and other ABIs with an
+`UnsupportedError` instead of producing an APK with the wrong architecture.
 
-If you need `armeabi-v7a` or `x86_64`, you can contact me to request a build of `libcpufeatures.so` for that ABI. 
+If you need another ABI, contact me to request a matching `libnode.so` /
+`libcpufeatures.so` build, then extend `_androidAbi` in `hook/build.dart`.
 
 ## iOS status
 
@@ -202,7 +230,7 @@ flutter test test/
 | Test | Covers |
 | --- | --- |
 | `test/bridge_smoke_test.dart` | NDJSON bridge protocol end-to-end against a local `node` process (5 concurrent `banner` calls, unknown-method rejection). Requires `NCM_BRIDGE_ROOT=$PWD/bridge` to be set. |
-| `test/hook_test.dart` | Hook behavior per ABI: emits a valid `CodeAsset` for both `libnode.so` and `libcpufeatures.so`; no-op on iOS / desktop; throws on unsupported architectures. Uses the official `hooks+code_assets` test harness, no device required. |
+| `test/hook_test.dart` | Hook behavior: emits valid `CodeAsset`s for `libnode.so`, `libcpufeatures.so` and the compiled bridge on arm64-v8a; downloads `node.exe` for Windows; no-op on iOS / Linux / macOS; rejects other Android ABIs. Uses the official `hooks+code_assets` test harness, no device required. Downloads are cached in `~/.cache/ncm_api_enhanced/`, so only the first run hits the network. |
 
 ## Release procedure (package author)
 

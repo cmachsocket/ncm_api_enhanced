@@ -23,7 +23,8 @@ class BridgeError implements Exception {
   final StackTrace? stackTrace;
 
   @override
-  String toString() => 'BridgeError: $message'
+  String toString() =>
+      'BridgeError: $message'
       '${cause == null ? '' : ' ($cause)'}';
 }
 
@@ -47,7 +48,10 @@ abstract class NcmBridge {
   /// Call an upstream NCM module function by its module-filename stem
   /// (e.g. `album`, `login_qr_key`, `user_account`). `params` is the same
   /// object you would pass over HTTP to the equivalent endpoint.
-  Future<Map<String, dynamic>> call(String method, [Map<String, dynamic>? params]);
+  Future<Map<String, dynamic>> call(
+    String method, [
+    Map<String, dynamic>? params,
+  ]);
 
   /// Stream of non-request events: "ready", "log", "fatal". Useful for
   /// surfacing stderr and crash diagnostics to the UI.
@@ -140,11 +144,7 @@ void dispatchNdjson({
         // timeout — log and continue.
         eventsCtl.add({
           'event': 'log',
-          'data': {
-            'level': 'orphan_response',
-            'id': id,
-            'payload': m,
-          },
+          'data': {'level': 'orphan_response', 'id': id, 'payload': m},
         });
         continue;
       }
@@ -152,9 +152,15 @@ void dispatchNdjson({
         completer.complete(m['result'] as Map<String, dynamic>);
       } else {
         final err = m['error'];
-        final msg = err is Map ? (err['message']?.toString() ?? 'unknown') : 'unknown';
+        final msg = err is Map
+            ? (err['message']?.toString() ?? 'unknown')
+            : 'unknown';
         final stack = err is Map ? err['stack']?.toString() : null;
-        final e = BridgeError(msg, null, stack == null ? null : StackTrace.fromString(stack));
+        final e = BridgeError(
+          msg,
+          null,
+          stack == null ? null : StackTrace.fromString(stack),
+        );
         completer.completeError(e);
       }
       continue;

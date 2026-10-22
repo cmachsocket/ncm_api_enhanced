@@ -1,10 +1,57 @@
 import 'dart:io';
 
 import 'package:code_assets/code_assets.dart';
+import 'package:crypto/crypto.dart';
 import 'package:hooks/hooks.dart';
 import 'package:native_toolchain_c/native_toolchain_c.dart';
 
 const _nodeVersion = '26.9.0';
+
+// Node.js version bundled for Windows desktop builds.
+//
+// Kept separate from _nodeVersion because the Android libnode.so release
+// is built per Node.js version and currently only exists for 26.9.0.
+// Bump this (and _nodeWindowsSha256) when a newer official Windows build
+// is wanted.
+const _windowsNodeVersion = '26.12.1';
+
+// ---------------------------------------------------------------------------
+// Windows node.exe
+//
+// The Windows desktop runtime is NOT committed to this repository. It is
+// ~105 MB (x64) / ~87 MB (arm64), which exceeds GitHub's per-file limit and
+// would bloat the pub tarball. Instead this hook downloads the official
+// Node.js binary at build time and registers it as a bundled CodeAsset, so
+// Flutter's installer drops it next to the application executable
+// (<app>/node.exe). DesktopNcmBridge spawns that file directly.
+//
+// SHA-256 values are copied from
+//   https://nodejs.org/dist/v26.12.1/SHASUMS256.txt
+// and MUST be updated together with _windowsNodeVersion.
+// ---------------------------------------------------------------------------
+
+const _nodeWindowsSha256 = <String, String>{
+  'win-x64': '1c63f1417e2e26d83ca9a9ec1d548524ab1305bc7209d90ebca56257ff0d84ed',
+  'win-arm64':
+      '7384299eeb99f419acaa4142771689fbca72e1c942f8da02b7928ffe1744e3ff',
+};
+
+// Official dist first, npmmirror as a fallback for networks that cannot
+// reach nodejs.org.
+List<Uri> _nodeWindowsUrls(String flavor) => <Uri>[
+  Uri.parse(
+    'https://nodejs.org/dist/v$_windowsNodeVersion/'
+    '$flavor/node.exe',
+  ),
+  Uri.parse(
+    'https://npmmirror.com/mirrors/node/v$_windowsNodeVersion/'
+    '$flavor/node.exe',
+  ),
+];
+
+// Retry count per URL. The runtimes are large (87-155 MB), so a dropped
+// connection should not fail the whole build.
+const _downloadAttempts = 3;
 
 const _nodeAndroidReleaseUrl =
     'https://github.com/cmachsocket/node/releases/download/'
@@ -48,6 +95,16 @@ Future<void> main(List<String> args) async {
 
     final config = input.config.code;
 
+    if (config.targetOS == OS.windows) {
+      await _buildWindowsRuntime(
+        input: input,
+        output: output,
+        architecture: config.targetArchitecture,
+      );
+
+      return;
+    }
+
     if (config.targetOS != OS.android) {
       return;
     }
@@ -55,13 +112,7 @@ Future<void> main(List<String> args) async {
     final architecture = config.targetArchitecture;
     final abi = _androidAbi(architecture);
 
-    if (abi == null) {
-      throw UnsupportedError(
-        'Unsupported Android architecture: $architecture',
-      );
-    }
-
-    print(
+    stdout.writeln(
       'ncm_api_enhanced: building Node.js Mobile $_nodeVersion '
       'for Android $abi',
     );
@@ -70,13 +121,9 @@ Future<void> main(List<String> args) async {
     // Shared output directory.
     // -----------------------------------------------------------------------
 
-    final sharedDir = Directory.fromUri(
-      input.outputDirectoryShared,
-    );
+    final sharedDir = Directory.fromUri(input.outputDirectoryShared);
 
-    await sharedDir.create(
-      recursive: true,
-    );
+    await sharedDir.create(recursive: true);
 
     // -----------------------------------------------------------------------
     // Locate Dart SDK.
@@ -95,25 +142,28 @@ Future<void> main(List<String> args) async {
     //
     //   <dart-sdk>/include/dart_api_dl.h
     //   <dart-sdk>/include/dart_api_dl.c
+    //
+    // Under `flutter test` the hook runs inside flutter_tester, so
+    // Platform.resolvedExecutable is NOT <dart-sdk>/bin/dart. Fall back
+    // to <FLUTTER_ROOT>/bin/cache/dart-sdk in that case.
     // -----------------------------------------------------------------------
 
-    final dartExecutable = File(
-      Platform.resolvedExecutable,
-    );
+    final dartSdkDir = _findDartSdkDir();
 
-    final dartSdkDir = dartExecutable.parent.parent;
+    if (dartSdkDir == null) {
+      throw StateError(
+        'ncm_api_enhanced: could not locate the Dart SDK '
+        '(dart_api_dl.h). Tried:\n'
+        '  - ${File(Platform.resolvedExecutable).parent.parent.path}\n'
+        '  - \$FLUTTER_ROOT/bin/cache/dart-sdk',
+      );
+    }
 
-    final dartIncludeDir = Directory(
-      '${dartSdkDir.path}/include',
-    );
+    final dartIncludeDir = Directory('${dartSdkDir.path}/include');
 
-    final dartApiDlHeader = File(
-      '${dartIncludeDir.path}/dart_api_dl.h',
-    );
+    final dartApiDlHeader = File('${dartIncludeDir.path}/dart_api_dl.h');
 
-    final dartApiDlSource = File(
-      '${dartIncludeDir.path}/dart_api_dl.c',
-    );
+    final dartApiDlSource = File('${dartIncludeDir.path}/dart_api_dl.c');
 
     if (!await dartApiDlHeader.exists()) {
       throw StateError(
@@ -129,28 +179,24 @@ Future<void> main(List<String> args) async {
       );
     }
 
-    print(
+    stdout.writeln(
       'ncm_api_enhanced: Dart SDK: '
       '${dartSdkDir.path}',
     );
 
-    print(
+    stdout.writeln(
       'ncm_api_enhanced: Dart include: '
       '${dartIncludeDir.path}',
     );
 
-    print(
+    stdout.writeln(
       'ncm_api_enhanced: Dart API DL source: '
       '${dartApiDlSource.path}',
     );
 
-    output.dependencies.add(
-      dartApiDlHeader.uri,
-    );
+    output.dependencies.add(dartApiDlHeader.uri);
 
-    output.dependencies.add(
-      dartApiDlSource.uri,
-    );
+    output.dependencies.add(dartApiDlSource.uri);
 
     // -----------------------------------------------------------------------
     // Prepare dart_api_dl.c for the C++ CBuilder.
@@ -170,20 +216,16 @@ Future<void> main(List<String> args) async {
     // required by clang.
     // -----------------------------------------------------------------------
 
-    final dartApiDlCpp = File(
-      '${sharedDir.path}/dart_api_dl_compat.cpp',
-    );
+    final dartApiDlCpp = File('${sharedDir.path}/dart_api_dl_compat.cpp');
 
     await _prepareDartApiDlCpp(
       source: dartApiDlSource,
       destination: dartApiDlCpp,
     );
 
-    output.dependencies.add(
-      dartApiDlCpp.uri,
-    );
+    output.dependencies.add(dartApiDlCpp.uri);
 
-    print(
+    stdout.writeln(
       'ncm_api_enhanced: prepared Dart API DL C++ source: '
       '${dartApiDlCpp.path}',
     );
@@ -196,19 +238,14 @@ Future<void> main(List<String> args) async {
       '${sharedDir.path}/nodejs-mobile-$_nodeVersion/$abi',
     );
 
-    await nodeDir.create(
-      recursive: true,
-    );
+    await nodeDir.create(recursive: true);
 
-    final nodeLibrary = File(
-      '${nodeDir.path}/libnode.so',
-    );
+    final nodeLibrary = File('${nodeDir.path}/libnode.so');
 
     if (!await nodeLibrary.exists()) {
       await _downloadNodeLibrary(
-        outputDirectory: sharedDir,
+        sharedRoot: sharedDir,
         destination: nodeLibrary,
-        abi: abi,
       );
     }
 
@@ -218,7 +255,7 @@ Future<void> main(List<String> args) async {
       );
     }
 
-    print(
+    stdout.writeln(
       'ncm_api_enhanced: libnode.so: '
       '${nodeLibrary.path}',
     );
@@ -236,12 +273,11 @@ Future<void> main(List<String> args) async {
     // `libnode.so`. We download it the same way we download libnode.so.
     // -----------------------------------------------------------------------
 
-    final cpuFeaturesLib = File(
-      '${nodeDir.path}/libcpufeatures.so',
-    );
+    final cpuFeaturesLib = File('${nodeDir.path}/libcpufeatures.so');
 
     if (!await cpuFeaturesLib.exists()) {
       await _downloadCpuFeaturesLibrary(
+        sharedRoot: sharedDir,
         destination: cpuFeaturesLib,
       );
     }
@@ -253,7 +289,7 @@ Future<void> main(List<String> args) async {
       );
     }
 
-    print(
+    stdout.writeln(
       'ncm_api_enhanced: libcpufeatures.so: '
       '${cpuFeaturesLib.path}',
     );
@@ -269,9 +305,7 @@ Future<void> main(List<String> args) async {
     // -----------------------------------------------------------------------
 
     final bridgeSource = File.fromUri(
-      input.packageRoot.resolve(
-        'native/android/node_bridge.cpp',
-      ),
+      input.packageRoot.resolve('native/android/node_bridge.cpp'),
     );
 
     if (!await bridgeSource.exists()) {
@@ -308,15 +342,10 @@ Future<void> main(List<String> args) async {
       name: 'ncm_node_bridge',
       assetName: _bridgeAssetName,
 
-      sources: <String>[
-        bridgeSource.path,
-        dartApiDlCpp.path,
-      ],
+      sources: <String>[bridgeSource.path, dartApiDlCpp.path],
 
       // dart_api_dl.h lives here.
-      includes: <String>[
-        dartIncludeDir.path,
-      ],
+      includes: <String>[dartIncludeDir.path],
 
       libraries: <String>[
         'node',
@@ -331,9 +360,7 @@ Future<void> main(List<String> args) async {
         'cpufeatures',
       ],
 
-      libraryDirectories: <String>[
-        nodeDir.path,
-      ],
+      libraryDirectories: <String>[nodeDir.path],
 
       language: Language.cpp,
 
@@ -348,10 +375,7 @@ Future<void> main(List<String> args) async {
       optimizationLevel: OptimizationLevel.o3,
     );
 
-    await builder.run(
-      input: input,
-      output: output,
-    );
+    await builder.run(input: input, output: output);
 
     // -----------------------------------------------------------------------
     // Register libnode.so + libcpufeatures.so as CodeAssets.
@@ -381,9 +405,7 @@ Future<void> main(List<String> args) async {
       ),
     );
 
-    print(
-      'ncm_api_enhanced: registered libnode.so for $abi',
-    );
+    stdout.writeln('ncm_api_enhanced: registered libnode.so for $abi');
 
     output.assets.code.add(
       CodeAsset(
@@ -394,10 +416,256 @@ Future<void> main(List<String> args) async {
       ),
     );
 
-    print(
-      'ncm_api_enhanced: registered libcpufeatures.so for $abi',
-    );
+    stdout.writeln('ncm_api_enhanced: registered libcpufeatures.so for $abi');
   });
+}
+
+// ===========================================================================
+// Locate the Dart SDK
+// ===========================================================================
+//
+// Prefers the SDK that owns the running executable; falls back to the
+// Flutter SDK's bundled Dart SDK, which is the one visible under
+// `flutter test` (the hook then runs inside flutter_tester, so
+// Platform.resolvedExecutable is not <dart-sdk>/bin/dart).
+Directory? _findDartSdkDir() {
+  final candidates = <Directory>[
+    File(Platform.resolvedExecutable).parent.parent,
+  ];
+
+  final flutterRoot = Platform.environment['FLUTTER_ROOT'];
+
+  if (flutterRoot != null && flutterRoot.isNotEmpty) {
+    candidates.add(Directory('$flutterRoot/bin/cache/dart-sdk'));
+  }
+
+  for (final dir in candidates) {
+    final header = File('${dir.path}/include/dart_api_dl.h');
+
+    final source = File('${dir.path}/include/dart_api_dl.c');
+
+    if (header.existsSync() && source.existsSync()) {
+      return dir;
+    }
+  }
+
+  return null;
+}
+
+// ===========================================================================
+// Windows: fetch node.exe and bundle it next to the app executable
+// ===========================================================================
+//
+// `flutter build windows` installs every DynamicLoadingBundled CodeAsset
+// into the application directory next to the runner executable. That is
+// exactly where DesktopNcmBridge looks for node.exe, so no Windows plugin
+// or CMake logic is required.
+//
+// This is the only place the Windows runtime comes from: it is neither
+// committed to git nor declared in pubspec's `flutter: assets:` section.
+Future<void> _buildWindowsRuntime({
+  required BuildInput input,
+  required BuildOutputBuilder output,
+  required Architecture architecture,
+}) async {
+  final flavor = _windowsFlavor(architecture);
+
+  final sharedDir = Directory.fromUri(input.outputDirectoryShared);
+
+  final nodeExe = File(
+    '${sharedDir.path}/nodejs-win-$_windowsNodeVersion/'
+    '$flavor/node.exe',
+  );
+
+  if (!await _hasValidNodeWindowsBinary(nodeExe, flavor)) {
+    final cached = await _cachedDownload(
+      fallbackDir: sharedDir,
+      relativePath: 'nodejs-win-$_windowsNodeVersion/$flavor/node.exe',
+      urls: _nodeWindowsUrls(flavor),
+      minSize: 50 * 1024 * 1024,
+      sha256: _nodeWindowsSha256[flavor],
+    );
+
+    if (cached.path != nodeExe.path) {
+      await nodeExe.parent.create(recursive: true);
+
+      await cached.copy(nodeExe.path);
+    }
+  }
+
+  stdout.writeln(
+    'ncm_api_enhanced: node.exe ($flavor): '
+    '${nodeExe.path} '
+    '(${await nodeExe.length() ~/ 1024 ~/ 1024} MB)',
+  );
+
+  output.assets.code.add(
+    CodeAsset(
+      package: input.packageName,
+      name: 'native/node.exe',
+      linkMode: DynamicLoadingBundled(),
+      file: nodeExe.uri,
+    ),
+  );
+
+  stdout.writeln('ncm_api_enhanced: registered node.exe for Windows $flavor');
+}
+
+// Maps a Flutter Windows target architecture to the Node.js dist flavor.
+String _windowsFlavor(Architecture architecture) {
+  switch (architecture) {
+    case Architecture.x64:
+      return 'win-x64';
+
+    case Architecture.arm64:
+      return 'win-arm64';
+
+    default:
+      throw UnsupportedError('Unsupported Windows architecture: $architecture');
+  }
+}
+
+// True when the file already exists with the expected checksum.
+Future<bool> _hasValidNodeWindowsBinary(File file, String flavor) {
+  final expected = _nodeWindowsSha256[flavor];
+
+  if (expected == null) {
+    throw UnsupportedError('No node.exe checksum for $flavor');
+  }
+
+  return _isValidDownload(
+    file,
+    // The smallest official binary is ~87 MB; anything smaller is a
+    // truncated download.
+    minSize: 50 * 1024 * 1024,
+    sha256: expected,
+  );
+}
+
+// ===========================================================================
+// Download cache
+// ===========================================================================
+//
+// Downloaded runtimes are stored in a per-user cache, so repeated builds
+// (and repeated `flutter test` runs) never hit the network again. Falls
+// back to the hook's shared output directory when the environment has no
+// usable home directory.
+Directory? _cacheDir() {
+  final env = Platform.environment;
+
+  final String? base;
+
+  if (Platform.isWindows) {
+    base = env['LOCALAPPDATA'] ?? env['APPDATA'];
+  } else {
+    base = env['XDG_CACHE_HOME'] ?? _homeSubdir('.cache');
+  }
+
+  if (base == null || base.isEmpty) {
+    return null;
+  }
+
+  return Directory('$base/ncm_api_enhanced');
+}
+
+String? _homeSubdir(String name) {
+  final home = Platform.environment['HOME'];
+
+  if (home == null || home.isEmpty) {
+    return null;
+  }
+
+  return '$home/$name';
+}
+
+// Returns a cached download, fetching it only when missing or invalid.
+//
+// relativePath is resolved under the cache directory (or fallbackDir
+// when there is none). urls are tried in order.
+Future<File> _cachedDownload({
+  required Directory fallbackDir,
+  required String relativePath,
+  required List<Uri> urls,
+  int? minSize,
+  String? sha256,
+}) async {
+  final cache = _cacheDir();
+
+  final file = File('${(cache ?? fallbackDir).path}/$relativePath');
+
+  if (await _isValidDownload(file, minSize: minSize, sha256: sha256)) {
+    return file;
+  }
+
+  await file.parent.create(recursive: true);
+
+  Object? lastError;
+
+  for (final url in urls) {
+    // Transient network failures are common for these large binaries, so
+    // retry a few times before falling back to the next mirror.
+    for (var attempt = 1; attempt <= _downloadAttempts; attempt++) {
+      try {
+        stdout.writeln(
+          'ncm_api_enhanced: downloading $url'
+          '${attempt == 1 ? '' : ' (attempt $attempt/$_downloadAttempts)'}',
+        );
+
+        await _downloadFile(url, file);
+
+        if (!await _isValidDownload(file, minSize: minSize, sha256: sha256)) {
+          await file.delete();
+
+          throw StateError('downloaded file failed validation: ${file.path}');
+        }
+
+        return file;
+      } catch (error) {
+        lastError = error;
+
+        final temp = File('${file.path}.download');
+
+        if (await temp.exists()) {
+          await temp.delete();
+        }
+
+        stdout.writeln('ncm_api_enhanced: download failed ($url): $error');
+      }
+    }
+  }
+
+  throw StateError(
+    'ncm_api_enhanced: could not download $relativePath.\n'
+    'Tried:\n'
+    '${urls.map((u) => '  - $u').join('\n')}\n'
+    'Last error: $lastError',
+  );
+}
+
+Future<bool> _isValidDownload(File file, {int? minSize, String? sha256}) async {
+  if (!await file.exists()) {
+    return false;
+  }
+
+  if (minSize != null && await file.length() < minSize) {
+    await file.delete();
+
+    return false;
+  }
+
+  if (sha256 != null && await _sha256Of(file) != sha256) {
+    await file.delete();
+
+    return false;
+  }
+
+  return true;
+}
+
+Future<String> _sha256Of(File file) async {
+  final digest = await sha256.bind(file.openRead()).first;
+
+  return digest.toString();
 }
 
 // ===========================================================================
@@ -438,19 +706,11 @@ Future<void> _prepareDartApiDlCpp({
     );
   }
 
-  content = content.replaceFirst(
-    original,
-    replacement,
-  );
+  content = content.replaceFirst(original, replacement);
 
-  await destination.parent.create(
-    recursive: true,
-  );
+  await destination.parent.create(recursive: true);
 
-  await destination.writeAsString(
-    content,
-    flush: true,
-  );
+  await destination.writeAsString(content, flush: true);
 }
 
 // ===========================================================================
@@ -473,48 +733,50 @@ Future<void> _prepareDartApiDlCpp({
 // ===========================================================================
 
 Future<void> _downloadCpuFeaturesLibrary({
+  required Directory sharedRoot,
   required File destination,
 }) async {
-  print(
-    'ncm_api_enhanced: downloading '
-    '$_cpuFeaturesAndroidReleaseUrl',
-  );
-
-  await _downloadFile(
-    Uri.parse(_cpuFeaturesAndroidReleaseUrl),
-    destination,
+  final source = await _cachedDownload(
+    fallbackDir: sharedRoot,
+    relativePath: 'nodejs-mobile-$_nodeVersion/libcpufeatures.so',
+    urls: <Uri>[Uri.parse(_cpuFeaturesAndroidReleaseUrl)],
+    minSize: 1024,
   );
 
   // Match libnode.so: ensure executable permission.
-  await Process.run('chmod', ['755', destination.path]);
+  if (!Platform.isWindows) {
+    await Process.run('chmod', ['755', source.path]);
+  }
 
-  print(
+  await destination.parent.create(recursive: true);
+
+  await source.copy(destination.path);
+
+  stdout.writeln(
     'ncm_api_enhanced: copied '
     '${destination.path}',
   );
 }
 
-
 // ===========================================================================
 // Android ABI
 // ===========================================================================
-
-String? _androidAbi(
-  Architecture architecture,
-) {
-  switch (architecture) {
-    case Architecture.arm64:
-      return 'arm64-v8a';
-
-    case Architecture.arm:
-      return 'armeabi-v7a';
-
-    case Architecture.x64:
-      return 'x86_64';
-
-    default:
-      return null;
+//
+// Only arm64-v8a is supported. The prebuilt release at
+// _nodeAndroidReleaseUrl carries a single arm64 libnode.so (and the
+// matching libcpufeatures.so); linking it into an armeabi-v7a or x86_64
+// build fails in the NDK linker anyway. Reject other ABIs up front with
+// a clear message instead of producing a broken APK.
+String _androidAbi(Architecture architecture) {
+  if (architecture == Architecture.arm64) {
+    return 'arm64-v8a';
   }
+
+  throw UnsupportedError(
+    'ncm_api_enhanced: Android ${architecture.name} is not supported. '
+    'The prebuilt libnode.so / libcpufeatures.so release only ships '
+    'arm64-v8a binaries. Build with --target-platform android-arm64.',
+  );
 }
 
 // ===========================================================================
@@ -522,62 +784,38 @@ String? _androidAbi(
 // ===========================================================================
 
 Future<void> _downloadNodeLibrary({
-  required Directory outputDirectory,
+  required Directory sharedRoot,
   required File destination,
-  required String abi,
 }) async {
-  final nodeDir = Directory(
-    '${outputDirectory.path}/nodejs-mobile-$_nodeVersion',
+  final source = await _cachedDownload(
+    fallbackDir: sharedRoot,
+    relativePath: 'nodejs-mobile-$_nodeVersion/libnode.so',
+    urls: <Uri>[Uri.parse(_nodeAndroidReleaseUrl)],
+    minSize: 1024 * 1024,
   );
-
-  await nodeDir.create(
-    recursive: true,
-  );
-
-  final soFile = File(
-    '${nodeDir.path}/libnode.so',
-  );
-
-  // -------------------------------------------------------------------------
-  // Download .so directly if necessary.
-  // -------------------------------------------------------------------------
-
-  if (!await soFile.exists()) {
-    print(
-      'ncm_api_enhanced: downloading '
-      '$_nodeAndroidReleaseUrl',
-    );
-
-    await _downloadFile(
-      Uri.parse(_nodeAndroidReleaseUrl),
-      soFile,
-    );
-  }
 
   // -------------------------------------------------------------------------
   // Ensure executable permission.
   // -------------------------------------------------------------------------
 
-  await Process.run('chmod', ['755', soFile.path]);
+  if (!Platform.isWindows) {
+    await Process.run('chmod', ['755', source.path]);
+  }
 
   // -------------------------------------------------------------------------
   // Copy to final destination.
   // -------------------------------------------------------------------------
 
-  print(
+  stdout.writeln(
     'ncm_api_enhanced: using '
-    '${soFile.path}',
+    '${source.path}',
   );
 
-  await destination.parent.create(
-    recursive: true,
-  );
+  await destination.parent.create(recursive: true);
 
-  await soFile.copy(
-    destination.path,
-  );
+  await source.copy(destination.path);
 
-  print(
+  stdout.writeln(
     'ncm_api_enhanced: copied '
     '${destination.path}',
   );
@@ -587,13 +825,8 @@ Future<void> _downloadNodeLibrary({
 // HTTP download
 // ===========================================================================
 
-Future<void> _downloadFile(
-  Uri url,
-  File destination,
-) async {
-  final temp = File(
-    '${destination.path}.download',
-  );
+Future<void> _downloadFile(Uri url, File destination) async {
+  final temp = File('${destination.path}.download');
 
   if (await temp.exists()) {
     await temp.delete();
@@ -616,26 +849,20 @@ Future<void> _downloadFile(
     if (response.statusCode != HttpStatus.ok) {
       await response.drain();
 
-      throw HttpException(
-        'HTTP ${response.statusCode} while downloading $url',
-      );
+      throw HttpException('HTTP ${response.statusCode} while downloading $url');
     }
 
     final sink = temp.openWrite();
 
     try {
-      await response.pipe(sink);
-    } catch (_) {
+      await sink.addStream(response);
+      await sink.flush();
+    } finally {
       await sink.close();
-      rethrow;
     }
 
-    await temp.rename(
-      destination.path,
-    );
+    await temp.rename(destination.path);
   } finally {
-    client.close(
-      force: true,
-    );
+    client.close(force: true);
   }
 }

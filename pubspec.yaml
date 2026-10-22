@@ -1,10 +1,12 @@
 name: ncm_api_enhanced
 description: >
   Unofficial Netease Cloud Music API for Flutter, backed by an embedded
-  Node.js v26.9.0 runtime. Exposes all 439 upstream module functions
-  as a Dart facade; runs on Linux/macOS/Windows (via the system `node`
-  binary), Android (via libnode.so loaded by the native bridge), and
-  iOS (via NodeMobile.xcframework embedded in the .app bundle).
+  Node.js runtime (26.9.0 on Android, 26.12.1 on Windows). Exposes all
+  439 upstream module functions as a Dart facade; runs on Linux/macOS
+  (via the system `node` binary), Windows (via node.exe fetched by the
+  build hook and bundled next to the app executable), Android (arm64-v8a
+  only, via libnode.so loaded by the native bridge), and iOS (via
+  NodeMobile.xcframework embedded in the .app bundle).
 version: 0.2.2
 homepage: https://github.com/cmachsocket/ncm_api_enhanced
 repository: https://github.com/cmachsocket/ncm_api_enhanced
@@ -25,6 +27,9 @@ dependencies:
   hooks: ^2.2.0
   native_toolchain_c: ^0.19.4
   ffi: ^2.2.0
+  # Used by hook/build.dart to verify the SHA-256 of the node.exe it
+  # downloads for Windows builds.
+  crypto: ^3.0.0
 
 dev_dependencies:
   flutter_test:
@@ -36,25 +41,15 @@ flutter:
     - assets/bridge/bridge.js
     - assets/bridge/dist/
     - assets/bridge/dist/data/
-    # Windows desktop node runtime. We ship a standalone node.exe alongside
-    # the bundle so end users don't need to install Node.js themselves.
-    # x64 + arm64 — the bridge picks the right one at startup based on
-    # `Platform.numberOfProcessors` / arch detection.
-    #
-    # Cost: ~99 MB (x64) + ~87 MB (arm64) = ~186 MB extra in the Windows
-    # release. Acceptable because the alternative is requiring users to
-    # install Node 22+ manually on every Windows machine.
-    - path: assets/runtime/win-x64/node.exe
-      platforms:
-        - windows
-    - path: assets/runtime/win-arm64/node.exe
-      platforms:
-        - windows
+    # The Windows node.exe (~105 MB x64 / ~87 MB arm64) is NOT listed here.
+    # hook/build.dart downloads it at build time and registers it as a
+    # bundled CodeAsset, which Flutter installs next to the app executable.
   plugin:
     platforms:
 
       ios:
         pluginClass: NcmNodeBridge
-      # Desktop (Linux/macOS/Windows) is pure Dart — it spawns the
-      # system `node` binary via Process. No plugin registration
-      # needed; NcmBridgeFactory picks DesktopNcmBridge automatically.
+      # Desktop (Linux/macOS) is pure Dart — it spawns the system `node`
+      # binary via Process. Windows uses the node.exe bundled by the hook.
+      # No plugin registration needed; NcmBridgeFactory picks
+      # DesktopNcmBridge automatically.

@@ -5,7 +5,8 @@
 //   NcmBridgeFactory.use(DesktopNcmBridge(...));
 // before constructing the [NcmApi].
 
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform;
 
 import 'bridge.dart';
 import 'desktop_bridge.dart';

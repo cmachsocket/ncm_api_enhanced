@@ -35,9 +35,13 @@ class NdjsonLineSplitter {
           if (decoded is Map<String, dynamic>) {
             out.add(NdjsonEvent.ok(decoded));
           } else {
-            out.add(NdjsonEvent.err(FormatException(
-              'expected JSON object, got ${decoded.runtimeType}',
-            )));
+            out.add(
+              NdjsonEvent.err(
+                FormatException(
+                  'expected JSON object, got ${decoded.runtimeType}',
+                ),
+              ),
+            );
           }
         } catch (e) {
           out.add(NdjsonEvent.err(FormatException('invalid JSON: $e')));

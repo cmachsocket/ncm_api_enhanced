@@ -435,7 +435,7 @@ class MobileNcmBridge implements NcmBridge {
       _log('START: bridgeRoot=$bridgeRoot');
 
       final bundleJs = File(
-        '${bridgeRoot}${Platform.pathSeparator}'
+        '$bridgeRoot${Platform.pathSeparator}'
         'dist${Platform.pathSeparator}'
         'bundle.js',
       );

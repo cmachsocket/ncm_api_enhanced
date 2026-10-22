@@ -3,9 +3,16 @@
 .flutter-plugins
 .flutter-plugins-dependencies
 
-# libnode.so — downloaded by hook/build.dart from nodejs-mobile releases.
-# ~62 MB per ABI; should NOT be committed.
+# Node.js runtime binaries.
+#
+# Android libnode.so — downloaded by hook/build.dart from nodejs-mobile
+# releases. ~62 MB per ABI; should NOT be committed.
 packages/ncm_api_enhanced/android/src/main/jniLibs/*/libnode.so
+
+# Windows node.exe — downloaded and SHA-256 verified by hook/build.dart at
+# build time (Node 26.12.1, ~105 MB x64 / ~87 MB arm64). Never commit it:
+# it exceeds GitHub's per-file limit and would bloat the pub tarball.
+assets/runtime/
 
 # Bridge runtime generated for desktop dev runs.
 /build/
