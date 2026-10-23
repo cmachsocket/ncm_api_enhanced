@@ -33,7 +33,7 @@ await api.shutdown();
 
 ```yaml
 dependencies:
-  ncm_api_enhanced: ^0.1.0
+  ncm_api_enhanced: ^0.3.0
 ```
 
 Then:
