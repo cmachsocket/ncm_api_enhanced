@@ -530,6 +530,14 @@ class NcmApi {
     return _nameAliases[dartName] ?? dartName;
   }
 
+  /// Strip the `Symbol("...")` wrapper from a symbol's string form so it
+  /// becomes a bare identifier (`Symbol("id")` -> `id`).
+  static String _symbolName(String raw) {
+    return raw.startsWith('Symbol("') && raw.endsWith('")')
+        ? raw.substring(8, raw.length - 2)
+        : raw;
+  }
+
   /// Dynamic dispatch. Lets callers write `api.album(...)` for any of the
   /// 439 upstream modules without us having to hand-write a wrapper for
   /// each one.
@@ -547,11 +555,7 @@ class NcmApi {
   @override
   @pragma('vm:entry-point')
   dynamic noSuchMethod(Invocation invocation) {
-    final raw = invocation.memberName.toString();
-    // invocation.memberName.toString() looks like `Symbol("foo")`.
-    final name = raw.startsWith('Symbol("') && raw.endsWith('")')
-        ? raw.substring(8, raw.length - 2)
-        : raw;
+    final name = _symbolName(invocation.memberName.toString());
     if (_objectMembers.contains(name)) {
       return super.noSuchMethod(invocation);
     }
@@ -573,7 +577,7 @@ class NcmApi {
     // back to its identifier name (the upstream module keys are always
     // bare identifiers, so the Symbol-to-String conversion is lossless).
     invocation.namedArguments.forEach((sym, value) {
-      params[sym.toString()] = value;
+      params[_symbolName(sym.toString())] = value;
     });
 
     _assertKnown(methodName);
