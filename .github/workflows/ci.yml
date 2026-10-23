@@ -1,0 +1,120 @@
+# CI for ncm_api_enhanced.
+#
+# Jobs:
+#
+#   analyze — `flutter analyze` + `dart format` check.
+#   test    — the unit and integration test suite (fast, no network).
+#   hook    — the build-hook tests. They download a ~260 MB Node.js runtime
+#             and compile the Android bridge, so they get their own job.
+#
+# The `hook` tests are tagged in `dart_test.yaml`; `test` runs with
+# `--exclude-tags=hook` and `hook` runs with `--tags=hook`.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the SDK the package is developed against: hook/build.dart
+  # patches the Dart SDK's dart_api_dl.c, so a new SDK layout can require a
+  # matching update there.
+  FLUTTER_VERSION: '3.47.7'
+  NODE_VERSION: '26'
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed lib test hook
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The desktop bridge spawns a real Node.js process.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Run tests
+        run: flutter test --exclude-tags=hook --reporter=github
+
+  hook:
+    name: Build hook tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'cmdline-tools;latest'
+          accept-android-sdk-licenses: true
+
+      # hook/build.dart compiles native/android/node_bridge.cpp for
+      # arm64-v8a, which needs the Android NDK.
+      - name: Install Android NDK
+        run: sdkmanager --install 'ndk;27.2.12479018'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - run: flutter pub get
+
+      # The hook caches the downloaded Node.js runtimes here.
+      - name: Cache Node.js runtimes
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ncm_api_enhanced
+          key: ncm-node-runtime-${{ runner.os }}-${{ hashFiles('hook/build.dart') }}
+          restore-keys: |
+            ncm-node-runtime-${{ runner.os }}-
+
+      - name: Run build hook tests
+        run: flutter test --tags=hook --reporter=github

@@ -4,6 +4,13 @@
 //
 // Run with:
 //   flutter test test/hook_test.dart --timeout=5x
+//
+// Tagged `hook` so CI can run it in a dedicated job: these tests download a
+// ~260 MB Node.js runtime and need the Android NDK.
+//   flutter test --tags=hook
+
+@Tags(<String>['hook'])
+library;
 
 import 'dart:io';
 

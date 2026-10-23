@@ -107,6 +107,10 @@ String? _realBridgeRoot() {
 void main() {
   final hasNode = _nodeAvailable();
 
+  // The groups below spawn a real Node process, so they are skipped when
+  // Node.js is not installed.
+  final nodeSkip = hasNode ? null : 'node is not installed';
+
   group('lifecycle guards', () {
     test('call() before start() throws a StateError', () {
       final bridge = DesktopNcmBridge();
@@ -302,7 +306,7 @@ void main() {
 
       await done.future.timeout(const Duration(seconds: 5));
     });
-  });
+  }, skip: nodeSkip);
 
   group('timeouts', () {
     test('a call that is never answered times out', () async {
@@ -327,7 +331,7 @@ void main() {
         ),
       );
     });
-  });
+  }, skip: nodeSkip);
 
   group('node crashes', () {
     test('pending calls are rejected and a fatal event is emitted', () async {
@@ -368,7 +372,7 @@ void main() {
       await fatal.future.timeout(const Duration(seconds: 5));
       await done.future.timeout(const Duration(seconds: 5));
     });
-  });
+  }, skip: nodeSkip);
 
   group('real bundled bridge', () {
     final realRoot = _realBridgeRoot();
